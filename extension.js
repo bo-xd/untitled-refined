@@ -3,7 +3,9 @@
 
   if (globalThis.__untitledRefinedInstalled) return;
 
-  const SEARCH_INPUT_SELECTOR = 'input[placeholder="Search tracks"]';
+  const PROJECT_SEARCH_INPUT_SELECTOR = 'input[placeholder="Search tracks"]';
+  const LIBRARY_SEARCH_INPUT_SELECTOR = 'input[placeholder="Search"]';
+  const SEARCH_INPUT_SELECTOR = `${PROJECT_SEARCH_INPUT_SELECTOR}, ${LIBRARY_SEARCH_INPUT_SELECTOR}`;
   const TRACK_ROW_SELECTOR = 'li[data-testid="project-detail-track"]';
   const TRACK_BUTTON_SELECTOR = '[data-testid="project-detail-track-button"]';
   const MAX_ANIMATED_ROWS = 12;
@@ -11,12 +13,14 @@
   const MOVE_DURATION_MS = 240;
   const EXACT_DURATION_MS = 420;
   const SEARCH_ENTER_DURATION_MS = 300;
+  const PROJECT_ENTER_DURATION_MS = 260;
   const EASE_OUT_QUART = "cubic-bezier(0.25, 1, 0.5, 1)";
   const EASE_OUT_EXPO = "cubic-bezier(0.16, 1, 0.3, 1)";
 
   let scheduled = false;
   let isApplying = false;
   let lastExactKey = null;
+  let animatedProjectPath = null;
   const activeAnimations = new WeakMap();
   const animatedSearchInputs = new WeakSet();
 
@@ -121,9 +125,35 @@
     return rows.every((row) => row.parentElement === candidate) ? candidate : null;
   }
 
-  function getTrackButtons() {
-    return Array.from(document.querySelectorAll(TRACK_ROW_SELECTOR))
-      .map((row) => row.querySelector(TRACK_BUTTON_SELECTOR))
+  function getSearchRows(input) {
+    if (input.matches(PROJECT_SEARCH_INPUT_SELECTOR)) {
+      return Array.from(document.querySelectorAll(TRACK_ROW_SELECTOR));
+    }
+
+    const candidates = Array.from(document.querySelectorAll("ul"))
+      .map((list) => ({
+        list,
+        rows: Array.from(list.children).filter((row) => row.querySelector("h3")),
+      }))
+      .filter(({ rows }) => rows.length > 0)
+      .sort((left, right) => right.rows.length - left.rows.length);
+
+    return candidates[0]?.rows ?? [];
+  }
+
+  function getRowAction(row) {
+    return (
+      row.querySelector(TRACK_BUTTON_SELECTOR) ??
+      row.querySelector('button[aria-label^="Play "]') ??
+      row.querySelector('button[aria-label^="Pause "]') ??
+      row.querySelector('a[aria-label^="Open track "]') ??
+      row.querySelector("a[href]")
+    );
+  }
+
+  function getTrackButtons(input) {
+    return getSearchRows(input)
+      .map(getRowAction)
       .filter((button) => button instanceof HTMLElement);
   }
 
@@ -240,6 +270,48 @@
     }
   }
 
+  function findProjectSurface() {
+    const row = document.querySelector(TRACK_ROW_SELECTOR);
+    if (!row) return null;
+
+    let surface = row.parentElement;
+    const fallback = surface;
+
+    while (surface && surface !== document.body) {
+      if (surface.querySelector("h1, h2") && surface.querySelector("img")) return surface;
+      surface = surface.parentElement;
+    }
+
+    return fallback;
+  }
+
+  function animateProjectEntrance() {
+    if (!location.pathname.startsWith("/library/project/")) {
+      animatedProjectPath = null;
+      return;
+    }
+
+    if (animatedProjectPath === location.pathname) return;
+
+    const surface = findProjectSurface();
+    if (!surface) return;
+
+    animatedProjectPath = location.pathname;
+    if (!canAnimate()) return;
+
+    playAnimation(
+      surface,
+      [
+        { opacity: 0.12, transform: "translateY(8px) scale(0.996)", filter: "blur(3px)" },
+        { opacity: 1, transform: "translateY(0) scale(1)", filter: "blur(0)" },
+      ],
+      {
+        duration: PROJECT_ENTER_DURATION_MS,
+        easing: EASE_OUT_EXPO,
+      },
+    );
+  }
+
   function animateRanking(rankedRows, previousPositions, exactRow) {
     if (!canAnimate()) return;
 
@@ -285,7 +357,7 @@
       return;
     }
 
-    const rows = Array.from(document.querySelectorAll(TRACK_ROW_SELECTOR));
+    const rows = getSearchRows(input);
     const list = getTrackList(rows);
     if (!list || rows.length < 2) return;
 
@@ -337,6 +409,7 @@
     if (isApplying) return;
 
     animateSearchEntrance();
+    animateProjectEntrance();
 
     const trackListChanged = mutations.some((mutation) =>
       Array.from(mutation.addedNodes).some((node) => {
@@ -364,7 +437,7 @@
       const input = getSearchInput();
       if (!input || event.isComposing) return;
 
-      const buttons = getTrackButtons();
+      const buttons = getTrackButtons(input);
       if (buttons.length === 0) return;
 
       if (event.target === input && input.value.trim()) {
@@ -391,6 +464,7 @@
 
   observer.observe(document.documentElement, { childList: true, subtree: true });
   animateSearchEntrance();
+  animateProjectEntrance();
   scheduleRanking();
 
   Object.defineProperty(globalThis, "__untitledRefinedInstalled", {
