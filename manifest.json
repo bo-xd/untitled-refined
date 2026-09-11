@@ -1,0 +1,15 @@
+{
+  "manifest_version": 3,
+  "name": "Untitled Refined",
+  "version": "1.0.0",
+  "description": "Better search ranking and smoother interactions for untitled.stream.",
+  "content_scripts": [
+    {
+      "matches": [
+        "https://untitled.stream/library/project/*"
+      ],
+      "js": ["extension.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
