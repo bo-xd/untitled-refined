@@ -121,6 +121,17 @@
     return rows.every((row) => row.parentElement === candidate) ? candidate : null;
   }
 
+  function getTrackButtons() {
+    return Array.from(document.querySelectorAll(TRACK_ROW_SELECTOR))
+      .map((row) => row.querySelector(TRACK_BUTTON_SELECTOR))
+      .filter((button) => button instanceof HTMLElement);
+  }
+
+  function focusTrack(button) {
+    button.focus({ preventScroll: true });
+    button.scrollIntoView({ block: "nearest" });
+  }
+
   function updateDisplayedIndex(row, index) {
     const button = row.querySelector(TRACK_BUTTON_SELECTOR);
     const label = button?.querySelector(":scope > div:first-child span");
@@ -343,6 +354,37 @@
       if (event.target instanceof HTMLInputElement && event.target.matches(SEARCH_INPUT_SELECTOR)) {
         scheduleRanking();
       }
+    },
+    true,
+  );
+
+  document.addEventListener(
+    "keydown",
+    (event) => {
+      const input = getSearchInput();
+      if (!input || event.isComposing) return;
+
+      const buttons = getTrackButtons();
+      if (buttons.length === 0) return;
+
+      if (event.target === input && input.value.trim()) {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          buttons[0].click();
+        } else if (event.key === "ArrowDown") {
+          event.preventDefault();
+          focusTrack(buttons[0]);
+        }
+        return;
+      }
+
+      const currentIndex = buttons.indexOf(event.target);
+      if (currentIndex < 0 || !["ArrowUp", "ArrowDown"].includes(event.key)) return;
+
+      event.preventDefault();
+      const direction = event.key === "ArrowDown" ? 1 : -1;
+      const nextIndex = Math.max(0, Math.min(buttons.length - 1, currentIndex + direction));
+      focusTrack(buttons[nextIndex]);
     },
     true,
   );
