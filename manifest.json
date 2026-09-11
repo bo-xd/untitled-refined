@@ -1,17 +1,14 @@
 {
   "manifest_version": 3,
-  "name": "Untitled Exact Search",
-  "version": "0.3.0",
-  "description": "Put exact song-title matches first in untitled.stream project search.",
+  "name": "Untitled Refined",
+  "version": "1.0.0",
+  "description": "Better search ranking and smoother interactions for untitled.stream.",
   "content_scripts": [
     {
       "matches": [
         "https://untitled.stream/library/project/*"
       ],
-      "js": [
-        "src/ranking.js",
-        "src/content.js"
-      ],
+      "js": ["extension.js"],
       "run_at": "document_idle"
     }
   ]
