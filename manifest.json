@@ -6,15 +6,7 @@
   "content_scripts": [
     {
       "matches": [
-        "https://untitled.stream/library*"
-      ],
-      "js": ["request.js"],
-      "run_at": "document_start",
-      "world": "MAIN"
-    },
-    {
-      "matches": [
-        "https://untitled.stream/library*"
+        "https://untitled.stream/library/project/*"
       ],
       "js": ["extension.js"],
       "run_at": "document_idle"

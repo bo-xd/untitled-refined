@@ -8,8 +8,7 @@ Untitled Refined fixes project search on [untitled](https://untitled.stream) and
 
 - Exact song titles appear first—even when apostrophes, punctuation, or capitalization differ.
 - Search results, the search bar, and project pages transition smoothly instead of popping in.
-- Press **Enter** to play the top result.
-- Press **↓** from search, then use **↑ / ↓** to move through tracks.
+- Use **↑ / ↓** to highlight a track, then press **Enter** to play it.
 
 Everything runs locally in the page: no tracking, data collection, network requests, or extra browser permissions.
 

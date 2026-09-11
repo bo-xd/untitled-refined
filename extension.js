@@ -3,11 +3,11 @@
 
   if (globalThis.__untitledRefinedInstalled) return;
 
-  const PROJECT_SEARCH_INPUT_SELECTOR = 'input[placeholder="Search tracks"]';
-  const LIBRARY_SEARCH_INPUT_SELECTOR = 'input[placeholder="Search"]';
-  const SEARCH_INPUT_SELECTOR = `${PROJECT_SEARCH_INPUT_SELECTOR}, ${LIBRARY_SEARCH_INPUT_SELECTOR}`;
+  const SEARCH_INPUT_SELECTOR = 'input[placeholder="Search tracks"]';
   const TRACK_ROW_SELECTOR = 'li[data-testid="project-detail-track"]';
   const TRACK_BUTTON_SELECTOR = '[data-testid="project-detail-track-button"]';
+  const SELECTED_ROW_ATTRIBUTE = "data-untitled-refined-selected";
+  const STYLE_ID = "untitled-refined-styles";
   const MAX_ANIMATED_ROWS = 12;
   const MAX_TRAVEL_PX = 44;
   const MOVE_DURATION_MS = 240;
@@ -21,6 +21,7 @@
   let isApplying = false;
   let lastExactKey = null;
   let animatedProjectPath = null;
+  let selectedRow = null;
   const activeAnimations = new WeakMap();
   const animatedSearchInputs = new WeakSet();
 
@@ -125,41 +126,60 @@
     return rows.every((row) => row.parentElement === candidate) ? candidate : null;
   }
 
-  function getSearchRows(input) {
-    if (input.matches(PROJECT_SEARCH_INPUT_SELECTOR)) {
-      return Array.from(document.querySelectorAll(TRACK_ROW_SELECTOR));
+  function getTrackRows() {
+    return Array.from(document.querySelectorAll(TRACK_ROW_SELECTOR));
+  }
+
+  function installStyles() {
+    if (document.getElementById(STYLE_ID)) return;
+
+    const style = document.createElement("style");
+    style.id = STYLE_ID;
+    style.textContent = `
+      ${TRACK_ROW_SELECTOR}[${SELECTED_ROW_ATTRIBUTE}="true"] {
+        background-color: var(--color-shading, rgba(127, 127, 127, 0.16)) !important;
+        border-color: color-mix(in srgb, currentColor 30%, transparent) !important;
+        transition: background-color 140ms ease-out, border-color 140ms ease-out !important;
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        ${TRACK_ROW_SELECTOR}[${SELECTED_ROW_ATTRIBUTE}="true"] {
+          transition: none !important;
+        }
+      }
+    `;
+    (document.head ?? document.documentElement).append(style);
+  }
+
+  function clearSelectedRow() {
+    if (!selectedRow) return;
+    selectedRow.removeAttribute(SELECTED_ROW_ATTRIBUTE);
+    selectedRow = null;
+  }
+
+  function selectTrackRow(row, { moveFocus = false, scroll = true } = {}) {
+    if (selectedRow !== row) {
+      clearSelectedRow();
+      selectedRow = row;
+      selectedRow.setAttribute(SELECTED_ROW_ATTRIBUTE, "true");
+
+      if (canAnimate()) {
+        playAnimation(
+          selectedRow,
+          [
+            { transform: "scale(0.995)", filter: "brightness(1.12)" },
+            { transform: "scale(1)", filter: "brightness(1)" },
+          ],
+          { duration: 160, easing: EASE_OUT_QUART },
+        );
+      }
     }
 
-    const candidates = Array.from(document.querySelectorAll("ul"))
-      .map((list) => ({
-        list,
-        rows: Array.from(list.children).filter((row) => row.querySelector("h3")),
-      }))
-      .filter(({ rows }) => rows.length > 0)
-      .sort((left, right) => right.rows.length - left.rows.length);
+    if (scroll) selectedRow.scrollIntoView({ block: "nearest" });
 
-    return candidates[0]?.rows ?? [];
-  }
-
-  function getRowAction(row) {
-    return (
-      row.querySelector(TRACK_BUTTON_SELECTOR) ??
-      row.querySelector('button[aria-label^="Play "]') ??
-      row.querySelector('button[aria-label^="Pause "]') ??
-      row.querySelector('a[aria-label^="Open track "]') ??
-      row.querySelector("a[href]")
-    );
-  }
-
-  function getTrackButtons(input) {
-    return getSearchRows(input)
-      .map(getRowAction)
-      .filter((button) => button instanceof HTMLElement);
-  }
-
-  function focusTrack(button) {
-    button.focus({ preventScroll: true });
-    button.scrollIntoView({ block: "nearest" });
+    if (moveFocus) {
+      selectedRow.querySelector(TRACK_BUTTON_SELECTOR)?.focus({ preventScroll: true });
+    }
   }
 
   function updateDisplayedIndex(row, index) {
@@ -357,7 +377,7 @@
       return;
     }
 
-    const rows = getSearchRows(input);
+    const rows = getTrackRows();
     const list = getTrackList(rows);
     if (!list || rows.length < 2) return;
 
@@ -410,6 +430,7 @@
 
     animateSearchEntrance();
     animateProjectEntrance();
+    if (!getSearchInput()) clearSelectedRow();
 
     const trackListChanged = mutations.some((mutation) =>
       Array.from(mutation.addedNodes).some((node) => {
@@ -425,6 +446,7 @@
     "input",
     (event) => {
       if (event.target instanceof HTMLInputElement && event.target.matches(SEARCH_INPUT_SELECTOR)) {
+        clearSelectedRow();
         scheduleRanking();
       }
     },
@@ -437,31 +459,49 @@
       const input = getSearchInput();
       if (!input || event.isComposing) return;
 
-      const buttons = getTrackButtons(input);
-      if (buttons.length === 0) return;
+      const rows = getTrackRows();
+      if (rows.length === 0) return;
 
-      if (event.target === input && input.value.trim()) {
-        if (event.key === "Enter") {
-          event.preventDefault();
-          buttons[0].click();
-        } else if (event.key === "ArrowDown") {
-          event.preventDefault();
-          focusTrack(buttons[0]);
-        }
+      const targetRow = event.target instanceof Element ? event.target.closest(TRACK_ROW_SELECTOR) : null;
+      const fromInput = event.target === input;
+      if (!fromInput && !targetRow) return;
+
+      if (["ArrowUp", "ArrowDown"].includes(event.key)) {
+        event.preventDefault();
+        event.stopPropagation();
+
+        const selectedIndex = selectedRow ? rows.indexOf(selectedRow) : -1;
+        const focusedIndex = targetRow ? rows.indexOf(targetRow) : -1;
+        const currentIndex = selectedIndex >= 0 ? selectedIndex : focusedIndex;
+        const direction = event.key === "ArrowDown" ? 1 : -1;
+        const nextIndex = currentIndex < 0
+          ? (direction > 0 ? 0 : rows.length - 1)
+          : Math.max(0, Math.min(rows.length - 1, currentIndex + direction));
+
+        selectTrackRow(rows[nextIndex], { moveFocus: Boolean(targetRow) });
         return;
       }
 
-      const currentIndex = buttons.indexOf(event.target);
-      if (currentIndex < 0 || !["ArrowUp", "ArrowDown"].includes(event.key)) return;
-
-      event.preventDefault();
-      const direction = event.key === "ArrowDown" ? 1 : -1;
-      const nextIndex = Math.max(0, Math.min(buttons.length - 1, currentIndex + direction));
-      focusTrack(buttons[nextIndex]);
+      if (fromInput && event.key === "Enter" && input.value.trim()) {
+        event.preventDefault();
+        const row = selectedRow && rows.includes(selectedRow) ? selectedRow : rows[0];
+        selectTrackRow(row);
+        row.querySelector(TRACK_BUTTON_SELECTOR)?.click();
+      }
     },
     true,
   );
 
+  document.addEventListener(
+    "click",
+    (event) => {
+      const row = event.target instanceof Element ? event.target.closest(TRACK_ROW_SELECTOR) : null;
+      if (row) selectTrackRow(row, { scroll: false });
+    },
+    true,
+  );
+
+  installStyles();
   observer.observe(document.documentElement, { childList: true, subtree: true });
   animateSearchEntrance();
   animateProjectEntrance();
