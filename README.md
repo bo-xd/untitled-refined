@@ -15,6 +15,8 @@ This extension reorders only the already-visible search results:
 
 It treats straight and curly apostrophes, punctuation, case, whitespace, and accents consistently. Existing row elements are moved rather than recreated, so Untitled's play buttons and menus continue to work.
 
+When ranking changes, the first visible results smoothly settle into place and a newly found exact match receives one brief emphasis pulse. Motion is capped to 12 rows for large projects and is disabled when the browser reports `prefers-reduced-motion: reduce`.
+
 ## Install in Brave
 
 1. Open `brave://extensions`.

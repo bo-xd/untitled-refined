@@ -1,6 +1,6 @@
 {
   "name": "untitled-exact-search",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "A permission-minimal browser extension that fixes project-track search ranking on untitled.stream.",
   "scripts": {
