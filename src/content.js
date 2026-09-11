@@ -13,12 +13,15 @@
   const MAX_TRAVEL_PX = 44;
   const MOVE_DURATION_MS = 240;
   const EXACT_DURATION_MS = 420;
+  const SEARCH_ENTER_DURATION_MS = 300;
   const EASE_OUT_QUART = "cubic-bezier(0.25, 1, 0.5, 1)";
+  const EASE_OUT_EXPO = "cubic-bezier(0.16, 1, 0.3, 1)";
 
   let scheduled = false;
   let isApplying = false;
   let lastExactKey = null;
   const activeAnimations = new WeakMap();
+  const animatedSearchInputs = new WeakSet();
 
   function getSearchInput() {
     return document.querySelector(SEARCH_INPUT_SELECTOR);
@@ -52,31 +55,95 @@
     );
   }
 
-  function stopAnimation(row) {
-    const animation = activeAnimations.get(row);
+  function stopAnimation(element) {
+    const animation = activeAnimations.get(element);
     if (!animation) return;
     animation.cancel();
-    activeAnimations.delete(row);
+    activeAnimations.delete(element);
   }
 
-  function playAnimation(row, keyframes, options) {
-    stopAnimation(row);
-    const animation = row.animate(keyframes, options);
-    activeAnimations.set(row, animation);
+  function playAnimation(element, keyframes, options) {
+    stopAnimation(element);
+    const animation = element.animate(keyframes, options);
+    activeAnimations.set(element, animation);
     animation.addEventListener(
       "finish",
       () => {
-        if (activeAnimations.get(row) === animation) activeAnimations.delete(row);
+        if (activeAnimations.get(element) === animation) activeAnimations.delete(element);
       },
       { once: true },
     );
     animation.addEventListener(
       "cancel",
       () => {
-        if (activeAnimations.get(row) === animation) activeAnimations.delete(row);
+        if (activeAnimations.get(element) === animation) activeAnimations.delete(element);
       },
       { once: true },
     );
+  }
+
+  function findDoneButton(input) {
+    let searchArea = input.parentElement;
+
+    while (searchArea && searchArea !== document.body) {
+      const doneButton = Array.from(searchArea.querySelectorAll("button")).find(
+        (button) => button.textContent?.trim().toLocaleLowerCase() === "done",
+      );
+      if (doneButton) return doneButton;
+      searchArea = searchArea.parentElement;
+    }
+
+    return null;
+  }
+
+  function animateSearchEntrance() {
+    const input = getSearchInput();
+    if (!input || animatedSearchInputs.has(input)) return;
+
+    animatedSearchInputs.add(input);
+    if (!canAnimate()) return;
+
+    const field = input.parentElement;
+    if (!field) return;
+
+    playAnimation(
+      field,
+      [
+        {
+          transform: "translateX(18px) scaleX(0.86)",
+          transformOrigin: "right center",
+          opacity: 0.18,
+          filter: "blur(5px)",
+        },
+        {
+          transform: "translateX(0) scaleX(1)",
+          transformOrigin: "right center",
+          opacity: 1,
+          filter: "blur(0)",
+        },
+      ],
+      {
+        duration: SEARCH_ENTER_DURATION_MS,
+        easing: EASE_OUT_EXPO,
+      },
+    );
+
+    const doneButton = findDoneButton(input);
+    if (doneButton) {
+      playAnimation(
+        doneButton,
+        [
+          { transform: "translateX(8px)", opacity: 0 },
+          { transform: "translateX(0)", opacity: 1 },
+        ],
+        {
+          delay: 45,
+          duration: 210,
+          easing: EASE_OUT_QUART,
+          fill: "backwards",
+        },
+      );
+    }
   }
 
   function animateRanking(rankedRows, previousPositions, exactRow) {
@@ -175,6 +242,8 @@
   const observer = new MutationObserver((mutations) => {
     if (isApplying) return;
 
+    animateSearchEntrance();
+
     const trackListChanged = mutations.some((mutation) =>
       Array.from(mutation.addedNodes).some((node) => {
         if (!(node instanceof Element)) return false;
@@ -196,6 +265,7 @@
   );
 
   observer.observe(document.documentElement, { childList: true, subtree: true });
+  animateSearchEntrance();
   scheduleRanking();
 
   Object.defineProperty(globalThis, "__untitledExactSearchInstalled", {

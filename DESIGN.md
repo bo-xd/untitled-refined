@@ -19,6 +19,7 @@ Native [untitled], in both light and dark themes. The extension adds no panels, 
 
 - Reordered rows use a FLIP-style translate and opacity settle lasting 240ms with ease-out-quart timing.
 - A newly resolved exact match receives one restrained 420ms brightness-and-scale emphasis.
+- Opening search gives the native field a 300ms right-origin expand/focus transition using ease-out-expo; the native Done control follows over 210ms.
 - Animated travel is capped at 44px, even when a result moves hundreds of rows.
 - At most the first 12 ranked rows animate, keeping large-project search responsive.
 - In-flight motion is cancelled and replaced when the user types again.

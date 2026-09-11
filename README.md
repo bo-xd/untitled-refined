@@ -17,6 +17,8 @@ It treats straight and curly apostrophes, punctuation, case, whitespace, and acc
 
 When ranking changes, the first visible results smoothly settle into place and a newly found exact match receives one brief emphasis pulse. Motion is capped to 12 rows for large projects and is disabled when the browser reports `prefers-reduced-motion: reduce`.
 
+Opening project search also transitions the native field into place with a short expand-and-focus movement while the native **Done** control settles alongside it. The extension animates Untitled's existing elements, so autofocus and keyboard behavior stay unchanged.
+
 ## Install in Brave
 
 1. Open `brave://extensions`.
