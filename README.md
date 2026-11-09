@@ -9,7 +9,8 @@ Untitled Refined fixes project search on [untitled](https://untitled.stream) and
 - Exact song titles appear first—even when apostrophes, punctuation, or capitalization differ.
 - Search results, the search bar, and project pages transition smoothly instead of popping in.
 - Use **↑ / ↓** to highlight a track, then press **Enter** to play it.
+- Favorite a track with the heart on its row, press **Shift+Enter** in search to favorite the highlighted track, or **F** on a focused track. Favorites are saved in your browser.
 
-Everything runs locally in the page: no tracking, data collection, network requests, or extra browser permissions.
+Everything runs locally in the page: no tracking, data collection, network requests, or extra browser permissions. Favorites stay in this browser’s local storage for untitled.stream.
 
 To install, download and extract the repo, open your browser's extensions page, enable **Developer mode**, and choose **Load unpacked**.

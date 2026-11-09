@@ -8,6 +8,9 @@
   const TRACK_BUTTON_SELECTOR = '[data-testid="project-detail-track-button"]';
   const SELECTED_ROW_ATTRIBUTE = "data-untitled-refined-selected";
   const STYLE_ID = "untitled-refined-styles";
+  const FAVORITE_BUTTON_CLASS = "untitled-refined-favorite";
+  const FAVORITE_ROW_ATTRIBUTE = "data-untitled-refined-favorite";
+  const FAVORITES_STORAGE_KEY = "untitled-refined:favorites";
   const MAX_ANIMATED_ROWS = 12;
   const MAX_TRAVEL_PX = 44;
   const MOVE_DURATION_MS = 240;
@@ -24,6 +27,7 @@
   let selectedRow = null;
   const activeAnimations = new WeakMap();
   const animatedSearchInputs = new WeakSet();
+  let favorites = loadFavorites();
 
   function normalize(value) {
     return String(value ?? "")
@@ -130,6 +134,92 @@
     return Array.from(document.querySelectorAll(TRACK_ROW_SELECTOR));
   }
 
+  function loadFavorites() {
+    try {
+      const stored = JSON.parse(localStorage.getItem(FAVORITES_STORAGE_KEY) ?? "[]");
+      return new Set(Array.isArray(stored) ? stored : []);
+    } catch {
+      return new Set();
+    }
+  }
+
+  function saveFavorites() {
+    try {
+      localStorage.setItem(FAVORITES_STORAGE_KEY, JSON.stringify([...favorites]));
+    } catch {
+      // Storage unavailable (private mode, blocked site data): keep favorites for this session only.
+    }
+  }
+
+  function getFavoriteKey(row) {
+    const track = row.dataset.trackSlug || normalize(getTitle(row));
+    return track ? `${location.pathname}::${track}` : null;
+  }
+
+  function isFavorite(row) {
+    const key = getFavoriteKey(row);
+    return Boolean(key && favorites.has(key));
+  }
+
+  function renderFavorite(row) {
+    const favorite = isFavorite(row);
+    const button = row.querySelector(`:scope > .${FAVORITE_BUTTON_CLASS}`);
+    const title = getTitle(row) || "track";
+
+    if (favorite) row.setAttribute(FAVORITE_ROW_ATTRIBUTE, "true");
+    else row.removeAttribute(FAVORITE_ROW_ATTRIBUTE);
+
+    if (button) {
+      button.setAttribute("aria-pressed", String(favorite));
+      button.setAttribute("aria-label", `${favorite ? "Remove" : "Add"} ${title} ${favorite ? "from" : "to"} favorites`);
+      button.title = favorite ? "Remove from favorites" : "Add to favorites";
+    }
+  }
+
+  function toggleFavorite(row) {
+    const key = getFavoriteKey(row);
+    if (!key) return;
+
+    if (favorites.has(key)) favorites.delete(key);
+    else favorites.add(key);
+
+    saveFavorites();
+    renderFavorite(row);
+
+    const button = row.querySelector(`:scope > .${FAVORITE_BUTTON_CLASS}`);
+    if (button && canAnimate() && favorites.has(key)) {
+      playAnimation(
+        button,
+        [
+          { transform: "translateY(-50%) scale(0.7)" },
+          { transform: "translateY(-50%) scale(1.18)", offset: 0.55 },
+          { transform: "translateY(-50%) scale(1)" },
+        ],
+        { duration: 280, easing: EASE_OUT_QUART },
+      );
+    }
+  }
+
+  function decorateRows() {
+    getTrackRows().forEach((row) => {
+      if (!row.querySelector(`:scope > .${FAVORITE_BUTTON_CLASS}`)) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = FAVORITE_BUTTON_CLASS;
+        button.innerHTML =
+          '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M12 20.5s-7.5-4.6-7.5-10.1A4.4 4.4 0 0 1 12 7.6a4.4 4.4 0 0 1 7.5 2.8c0 5.5-7.5 10.1-7.5 10.1Z"/></svg>';
+        button.addEventListener("click", (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          toggleFavorite(row);
+        });
+        row.append(button);
+      }
+
+      renderFavorite(row);
+    });
+  }
+
   function installStyles() {
     if (document.getElementById(STYLE_ID)) return;
 
@@ -142,8 +232,55 @@
         transition: background-color 140ms ease-out, border-color 140ms ease-out !important;
       }
 
+      ${TRACK_ROW_SELECTOR} {
+        position: relative;
+      }
+
+      .${FAVORITE_BUTTON_CLASS} {
+        position: absolute;
+        top: 50%;
+        right: 56px;
+        z-index: 1;
+        display: grid;
+        place-items: center;
+        width: 28px;
+        height: 28px;
+        padding: 0;
+        border: 0;
+        border-radius: 999px;
+        background: transparent;
+        color: inherit;
+        cursor: pointer;
+        opacity: 0;
+        transform: translateY(-50%);
+        transition: opacity 140ms ease-out, background-color 140ms ease-out;
+      }
+
+      .${FAVORITE_BUTTON_CLASS} svg {
+        fill: none;
+        stroke: currentColor;
+        stroke-width: 1.8;
+        stroke-linejoin: round;
+      }
+
+      .${FAVORITE_BUTTON_CLASS}[aria-pressed="true"] svg {
+        fill: currentColor;
+      }
+
+      .${FAVORITE_BUTTON_CLASS}:hover {
+        background-color: color-mix(in srgb, currentColor 12%, transparent);
+      }
+
+      ${TRACK_ROW_SELECTOR}:hover .${FAVORITE_BUTTON_CLASS},
+      ${TRACK_ROW_SELECTOR}[${SELECTED_ROW_ATTRIBUTE}="true"] .${FAVORITE_BUTTON_CLASS},
+      ${TRACK_ROW_SELECTOR}[${FAVORITE_ROW_ATTRIBUTE}="true"] .${FAVORITE_BUTTON_CLASS},
+      .${FAVORITE_BUTTON_CLASS}:focus-visible {
+        opacity: 1;
+      }
+
       @media (prefers-reduced-motion: reduce) {
-        ${TRACK_ROW_SELECTOR}[${SELECTED_ROW_ATTRIBUTE}="true"] {
+        ${TRACK_ROW_SELECTOR}[${SELECTED_ROW_ATTRIBUTE}="true"],
+        .${FAVORITE_BUTTON_CLASS} {
           transition: none !important;
         }
       }
@@ -430,6 +567,7 @@
 
     animateSearchEntrance();
     animateProjectEntrance();
+    decorateRows();
     if (!getSearchInput()) clearSelectedRow();
 
     const trackListChanged = mutations.some((mutation) =>
@@ -456,8 +594,25 @@
   document.addEventListener(
     "keydown",
     (event) => {
+      if (event.isComposing) return;
+
+      const focusedRow = event.target instanceof Element ? event.target.closest(TRACK_ROW_SELECTOR) : null;
+      const plainKey = !event.altKey && !event.ctrlKey && !event.metaKey;
+      const favoriteFromRow = focusedRow && plainKey && !event.shiftKey && event.code === "KeyF";
+      const favoriteFromSearch =
+        plainKey && event.shiftKey && event.key === "Enter" &&
+        event.target instanceof Element && event.target.matches(SEARCH_INPUT_SELECTOR) &&
+        selectedRow?.isConnected;
+
+      if (favoriteFromRow || favoriteFromSearch) {
+        event.preventDefault();
+        event.stopPropagation();
+        toggleFavorite(focusedRow ?? selectedRow);
+        return;
+      }
+
       const input = getSearchInput();
-      if (!input || event.isComposing) return;
+      if (!input) return;
 
       const rows = getTrackRows();
       if (rows.length === 0) return;
@@ -495,13 +650,22 @@
   document.addEventListener(
     "click",
     (event) => {
-      const row = event.target instanceof Element ? event.target.closest(TRACK_ROW_SELECTOR) : null;
+      if (!(event.target instanceof Element)) return;
+      if (event.target.closest(`.${FAVORITE_BUTTON_CLASS}`)) return;
+      const row = event.target.closest(TRACK_ROW_SELECTOR);
       if (row) selectTrackRow(row, { scroll: false });
     },
     true,
   );
 
+  window.addEventListener("storage", (event) => {
+    if (event.key !== FAVORITES_STORAGE_KEY) return;
+    favorites = loadFavorites();
+    getTrackRows().forEach(renderFavorite);
+  });
+
   installStyles();
+  decorateRows();
   observer.observe(document.documentElement, { childList: true, subtree: true });
   animateSearchEntrance();
   animateProjectEntrance();
