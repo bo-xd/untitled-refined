@@ -11,6 +11,11 @@
   const FAVORITE_BUTTON_CLASS = "untitled-refined-favorite";
   const FAVORITE_ROW_ATTRIBUTE = "data-untitled-refined-favorite";
   const FAVORITES_STORAGE_KEY = "untitled-refined:favorites";
+  const FAVORITES_ONLY_ATTRIBUTE = "data-untitled-refined-favorites-only";
+  const FAVORITES_BAR_CLASS = "untitled-refined-favorites-bar";
+  const PLAYER_FAVORITE_CLASS = "untitled-refined-player-favorite";
+  const HEART_SVG =
+    '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M12 20.5s-7.5-4.6-7.5-10.1A4.4 4.4 0 0 1 12 7.6a4.4 4.4 0 0 1 7.5 2.8c0 5.5-7.5 10.1-7.5 10.1Z"/></svg>';
   const MAX_ANIMATED_ROWS = 12;
   const MAX_TRAVEL_PX = 44;
   const MOVE_DURATION_MS = 240;
@@ -28,6 +33,14 @@
   const activeAnimations = new WeakMap();
   const animatedSearchInputs = new WeakSet();
   let favorites = loadFavorites();
+  let favoriteIndex = buildFavoriteIndex();
+  let favoritesOnly = false;
+  let favoritesOnlyPath = null;
+  let favoritesBar = null;
+  let pinnedPath = null;
+  let playerButton = null;
+  let observedPlaybar = null;
+  let playerSyncScheduled = false;
 
   function normalize(value) {
     return String(value ?? "")
@@ -104,17 +117,6 @@
     return 600 + Math.round((distance / scale) * 100) + Math.abs(normalizedTitle.length - normalizedQuery.length);
   }
 
-  function rank(items, query, getTitle) {
-    return items
-      .map((item, originalIndex) => ({
-        item,
-        originalIndex,
-        score: score(getTitle(item), query),
-      }))
-      .sort((left, right) => left.score - right.score || left.originalIndex - right.originalIndex)
-      .map(({ item }) => item);
-  }
-
   function getSearchInput() {
     return document.querySelector(SEARCH_INPUT_SELECTOR);
   }
@@ -134,70 +136,115 @@
     return Array.from(document.querySelectorAll(TRACK_ROW_SELECTOR));
   }
 
+  function getProjectPath(path = location.pathname) {
+    return path.match(/^\/library\/project\/[^/?#]+/)?.[0] ?? null;
+  }
+
+  // Favorites are stored as { path, titles }: the project path plus one or more normalized
+  // titles. The playbar shows "Artist - Title" while rows may show only "Title", so a
+  // favorite added from the player keeps both forms and matches either.
   function loadFavorites() {
     try {
       const stored = JSON.parse(localStorage.getItem(FAVORITES_STORAGE_KEY) ?? "[]");
-      return new Set(Array.isArray(stored) ? stored : []);
+      if (!Array.isArray(stored)) return [];
+      return stored.filter(
+        (entry) => entry && typeof entry.path === "string" && Array.isArray(entry.titles),
+      );
     } catch {
-      return new Set();
+      return [];
     }
   }
 
-  function saveFavorites() {
+  function buildFavoriteIndex() {
+    return new Set(favorites.flatMap((entry) => entry.titles.map((title) => `${entry.path}::${title}`)));
+  }
+
+  function setFavorites(next) {
+    favorites = next;
+    favoriteIndex = buildFavoriteIndex();
+
     try {
-      localStorage.setItem(FAVORITES_STORAGE_KEY, JSON.stringify([...favorites]));
+      localStorage.setItem(FAVORITES_STORAGE_KEY, JSON.stringify(favorites));
     } catch {
       // Storage unavailable (private mode, blocked site data): keep favorites for this session only.
     }
+
+    refreshFavoriteViews();
   }
 
-  function getFavoriteKey(row) {
-    const track = row.dataset.trackSlug || normalize(getTitle(row));
-    return track ? `${location.pathname}::${track}` : null;
+  function isFavoriteTitle(path, titles) {
+    return Boolean(path) && titles.some((title) => title && favoriteIndex.has(`${path}::${title}`));
+  }
+
+  function toggleFavoriteTitles(path, titles) {
+    const uniqueTitles = [...new Set(titles.filter(Boolean))];
+    if (!path || uniqueTitles.length === 0) return false;
+
+    if (isFavoriteTitle(path, uniqueTitles)) {
+      setFavorites(
+        favorites.filter(
+          (entry) => entry.path !== path || !entry.titles.some((title) => uniqueTitles.includes(title)),
+        ),
+      );
+      return false;
+    }
+
+    setFavorites([...favorites, { path, titles: uniqueTitles }]);
+    return true;
+  }
+
+  function countProjectFavorites(path = getProjectPath()) {
+    return path ? favorites.filter((entry) => entry.path === path).length : 0;
   }
 
   function isFavorite(row) {
-    const key = getFavoriteKey(row);
-    return Boolean(key && favorites.has(key));
+    return isFavoriteTitle(getProjectPath(), [normalize(getTitle(row))]);
+  }
+
+  function popHeart(button, baseTransform = "") {
+    if (!button || !canAnimate()) return;
+
+    playAnimation(
+      button,
+      [
+        { transform: `${baseTransform} scale(0.7)` },
+        { transform: `${baseTransform} scale(1.18)`, offset: 0.55 },
+        { transform: `${baseTransform} scale(1)` },
+      ],
+      { duration: 280, easing: EASE_OUT_QUART },
+    );
+  }
+
+  function describeFavorite(button, favorite, title) {
+    button.setAttribute("aria-pressed", String(favorite));
+    button.setAttribute(
+      "aria-label",
+      `${favorite ? "Remove" : "Add"} ${title || "track"} ${favorite ? "from" : "to"} favorites`,
+    );
+    button.title = favorite ? "Remove from favorites" : "Add to favorites";
   }
 
   function renderFavorite(row) {
     const favorite = isFavorite(row);
     const button = row.querySelector(`:scope > .${FAVORITE_BUTTON_CLASS}`);
-    const title = getTitle(row) || "track";
 
     if (favorite) row.setAttribute(FAVORITE_ROW_ATTRIBUTE, "true");
     else row.removeAttribute(FAVORITE_ROW_ATTRIBUTE);
 
-    if (button) {
-      button.setAttribute("aria-pressed", String(favorite));
-      button.setAttribute("aria-label", `${favorite ? "Remove" : "Add"} ${title} ${favorite ? "from" : "to"} favorites`);
-      button.title = favorite ? "Remove from favorites" : "Add to favorites";
-    }
+    if (button) describeFavorite(button, favorite, getTitle(row));
   }
 
   function toggleFavorite(row) {
-    const key = getFavoriteKey(row);
-    if (!key) return;
+    const added = toggleFavoriteTitles(getProjectPath(), [normalize(getTitle(row))]);
+    if (added) popHeart(row.querySelector(`:scope > .${FAVORITE_BUTTON_CLASS}`), "translateY(-50%)");
+  }
 
-    if (favorites.has(key)) favorites.delete(key);
-    else favorites.add(key);
-
-    saveFavorites();
-    renderFavorite(row);
-
-    const button = row.querySelector(`:scope > .${FAVORITE_BUTTON_CLASS}`);
-    if (button && canAnimate() && favorites.has(key)) {
-      playAnimation(
-        button,
-        [
-          { transform: "translateY(-50%) scale(0.7)" },
-          { transform: "translateY(-50%) scale(1.18)", offset: 0.55 },
-          { transform: "translateY(-50%) scale(1)" },
-        ],
-        { duration: 280, easing: EASE_OUT_QUART },
-      );
-    }
+  function refreshFavoriteViews() {
+    getTrackRows().forEach(renderFavorite);
+    if (favoritesOnly && countProjectFavorites() === 0) setFavoritesOnly(false);
+    renderFavoritesBar();
+    syncPlayerFavorite();
+    scheduleRanking();
   }
 
   function decorateRows() {
@@ -206,8 +253,7 @@
         const button = document.createElement("button");
         button.type = "button";
         button.className = FAVORITE_BUTTON_CLASS;
-        button.innerHTML =
-          '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M12 20.5s-7.5-4.6-7.5-10.1A4.4 4.4 0 0 1 12 7.6a4.4 4.4 0 0 1 7.5 2.8c0 5.5-7.5 10.1-7.5 10.1Z"/></svg>';
+        button.innerHTML = HEART_SVG;
         button.addEventListener("click", (event) => {
           event.preventDefault();
           event.stopPropagation();
@@ -218,6 +264,119 @@
 
       renderFavorite(row);
     });
+  }
+
+  function getNavigableRows() {
+    const rows = getTrackRows();
+    return favoritesOnly ? rows.filter(isFavorite) : rows;
+  }
+
+  function setFavoritesOnly(enabled) {
+    favoritesOnly = enabled;
+    favoritesOnlyPath = enabled ? getProjectPath() : null;
+    document.documentElement.toggleAttribute(FAVORITES_ONLY_ATTRIBUTE, enabled);
+    if (enabled && selectedRow && !isFavorite(selectedRow)) clearSelectedRow();
+    renderFavoritesBar();
+  }
+
+  function renderFavoritesBar(list = getTrackList(getTrackRows())) {
+    const count = countProjectFavorites();
+
+    if (!list || count === 0) {
+      favoritesBar?.remove();
+      return;
+    }
+
+    if (!favoritesBar) {
+      favoritesBar = document.createElement("button");
+      favoritesBar.type = "button";
+      favoritesBar.className = FAVORITES_BAR_CLASS;
+      favoritesBar.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        setFavoritesOnly(!favoritesOnly);
+      });
+    }
+
+    const label = `Favorites only · ${count}`;
+    if (favoritesBar.dataset.label !== label) {
+      favoritesBar.dataset.label = label;
+      favoritesBar.innerHTML = `${HEART_SVG}<span>${label}</span>`;
+    }
+    favoritesBar.setAttribute("aria-pressed", String(favoritesOnly));
+    favoritesBar.title = favoritesOnly ? "Show all tracks" : "Show only favorite tracks";
+
+    if (favoritesBar.nextElementSibling !== list) list.before(favoritesBar);
+  }
+
+  function getPlayer() {
+    const playbar = document.getElementById("playbar");
+    if (!playbar) return null;
+
+    const title = playbar.querySelector(".playbar-title span")?.textContent?.trim() ?? "";
+    const href = playbar.querySelector('a[href*="/library/project/"]')?.getAttribute("href") ?? "";
+    let path = null;
+    try {
+      path = getProjectPath(new URL(href, location.origin).pathname);
+    } catch {
+      path = null;
+    }
+
+    const playButton = playbar.querySelector('button[aria-label="Pause"], button[aria-label="Play"]');
+    return { playbar, title, path, controls: playButton?.parentElement ?? null };
+  }
+
+  function getPlayerTitles(title) {
+    const separator = title.indexOf(" - ");
+    return [normalize(title), separator >= 0 ? normalize(title.slice(separator + 3)) : ""].filter(Boolean);
+  }
+
+  const playerObserver = new MutationObserver(schedulePlayerSync);
+
+  function schedulePlayerSync() {
+    if (playerSyncScheduled) return;
+    playerSyncScheduled = true;
+    requestAnimationFrame(() => {
+      playerSyncScheduled = false;
+      syncPlayerFavorite();
+    });
+  }
+
+  function syncPlayerFavorite() {
+    const player = getPlayer();
+    if (!player?.controls) return;
+
+    if (observedPlaybar !== player.playbar) {
+      playerObserver.disconnect();
+      playerObserver.observe(player.playbar, { childList: true, subtree: true, characterData: true });
+      observedPlaybar = player.playbar;
+    }
+
+    if (!playerButton) {
+      playerButton = document.createElement("button");
+      playerButton.type = "button";
+      playerButton.className =
+        `${PLAYER_FAVORITE_CLASS} flex h-44 w-44 items-center justify-center transition-opacity duration-150 hover:opacity-80`;
+      playerButton.innerHTML = HEART_SVG;
+      playerButton.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        const current = getPlayer();
+        if (!current) return;
+        const added = toggleFavoriteTitles(current.path, getPlayerTitles(current.title));
+        if (added) popHeart(playerButton);
+      });
+    }
+
+    if (playerButton.parentElement !== player.controls || player.controls.firstElementChild !== playerButton) {
+      player.controls.prepend(playerButton);
+    }
+
+    const available = Boolean(player.title && player.path);
+    const favorite = available && isFavoriteTitle(player.path, getPlayerTitles(player.title));
+    playerButton.hidden = !available;
+    playerButton.classList.toggle("text-yellow", favorite);
+    describeFavorite(playerButton, favorite, player.title);
   }
 
   function installStyles() {
@@ -278,8 +437,63 @@
         opacity: 1;
       }
 
+      html[${FAVORITES_ONLY_ATTRIBUTE}] ${TRACK_ROW_SELECTOR}:not([${FAVORITE_ROW_ATTRIBUTE}="true"]) {
+        display: none !important;
+      }
+
+      .${FAVORITES_BAR_CLASS} {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        margin: 0 0 8px;
+        padding: 4px 12px 4px 10px;
+        border: 1px solid color-mix(in srgb, currentColor 22%, transparent);
+        border-radius: 999px;
+        background: transparent;
+        color: inherit;
+        font: inherit;
+        font-size: 13px;
+        line-height: 18px;
+        cursor: pointer;
+        opacity: 0.8;
+        transition: opacity 140ms ease-out, background-color 140ms ease-out;
+      }
+
+      .${FAVORITES_BAR_CLASS}:hover,
+      .${FAVORITES_BAR_CLASS}[aria-pressed="true"] {
+        opacity: 1;
+      }
+
+      .${FAVORITES_BAR_CLASS}[aria-pressed="true"] {
+        background-color: color-mix(in srgb, currentColor 12%, transparent);
+      }
+
+      .${FAVORITES_BAR_CLASS} svg,
+      .${PLAYER_FAVORITE_CLASS} svg {
+        flex: none;
+        fill: none;
+        stroke: currentColor;
+        stroke-width: 1.8;
+        stroke-linejoin: round;
+      }
+
+      .${FAVORITES_BAR_CLASS}[aria-pressed="true"] svg,
+      .${PLAYER_FAVORITE_CLASS}[aria-pressed="true"] svg {
+        fill: currentColor;
+      }
+
+      .${PLAYER_FAVORITE_CLASS} svg {
+        width: 20px;
+        height: 20px;
+      }
+
+      .${PLAYER_FAVORITE_CLASS}[hidden] {
+        display: none !important;
+      }
+
       @media (prefers-reduced-motion: reduce) {
         ${TRACK_ROW_SELECTOR}[${SELECTED_ROW_ATTRIBUTE}="true"],
+        .${FAVORITES_BAR_CLASS},
         .${FAVORITE_BUTTON_CLASS} {
           transition: none !important;
         }
@@ -320,6 +534,7 @@
   }
 
   function updateDisplayedIndex(row, index) {
+    if (!Number.isFinite(index)) return;
     const button = row.querySelector(TRACK_BUTTON_SELECTOR);
     const label = button?.querySelector(":scope > div:first-child span");
 
@@ -503,24 +718,76 @@
     });
   }
 
+  function getOriginalOrder(row) {
+    const order = Number.parseInt(row.dataset.untitledRefinedOrder ?? "", 10);
+    return Number.isNaN(order) ? Number.POSITIVE_INFINITY : order;
+  }
+
+  function recordOriginalOrder(rows) {
+    rows.forEach((row, index) => {
+      if (row.dataset.untitledRefinedOrder === undefined) row.dataset.untitledRefinedOrder = String(index);
+    });
+  }
+
+  // Search: score tier first (exact, prefix, word, substring, terms, fuzzy), then favorites,
+  // then the precise score. An exact match always wins; favorites win close calls.
+  function rankTracks(rows, query) {
+    return rows
+      .map((row, index) => {
+        const value = score(getTitle(row), query);
+        return {
+          row,
+          index,
+          value,
+          tier: value === 0 ? -1 : Math.floor(value / 100),
+          favorite: isFavorite(row),
+        };
+      })
+      .sort(
+        (left, right) =>
+          left.tier - right.tier ||
+          Number(right.favorite) - Number(left.favorite) ||
+          left.value - right.value ||
+          left.index - right.index,
+      )
+      .map(({ row }) => row);
+  }
+
+  // No search: favorites pinned to the top, everything else in Untitled's original order.
+  function pinFavorites(rows) {
+    return rows
+      .map((row, index) => ({ row, index, favorite: isFavorite(row), order: getOriginalOrder(row) }))
+      .sort(
+        (left, right) =>
+          Number(right.favorite) - Number(left.favorite) ||
+          left.order - right.order ||
+          left.index - right.index,
+      )
+      .map(({ row }) => row);
+  }
+
   function applyRanking() {
     scheduled = false;
     if (isApplying) return;
 
     const input = getSearchInput();
     const query = input?.value?.trim() ?? "";
-    if (!input || !query) {
-      lastExactKey = null;
-      return;
-    }
-
+    const path = getProjectPath();
     const rows = getTrackRows();
     const list = getTrackList(rows);
-    if (!list || rows.length < 2) return;
 
-    const rankedRows = rank(rows, query, getTitle);
+    renderFavoritesBar(list);
+    if (!query) {
+      lastExactKey = null;
+      recordOriginalOrder(rows);
+    }
+
+    if (!list || rows.length < 2) return;
+    if (!query && countProjectFavorites(path) === 0 && pinnedPath !== path) return;
+
+    const rankedRows = query ? rankTracks(rows, query) : pinFavorites(rows);
     const needsReorder = rankedRows.some((row, index) => row !== rows[index]);
-    const exactRow = rankedRows.find((row) => score(getTitle(row), query) === 0) ?? null;
+    const exactRow = query ? rankedRows.find((row) => score(getTitle(row), query) === 0) ?? null : null;
     const exactKey = exactRow
       ? `${normalize(query)}:${exactRow.dataset.trackSlug ?? getTitle(exactRow)}`
       : null;
@@ -541,11 +808,14 @@
         const fragment = document.createDocumentFragment();
         rankedRows.forEach((row) => fragment.append(row));
         list.append(fragment);
+        if (!query) pinnedPath = path;
       }
 
-      rankedRows.forEach(updateDisplayedIndex);
-      input.dataset.untitledRefinedActive = "true";
-      input.title = "Exact title matches are ranked first";
+      rankedRows.forEach((row, index) => updateDisplayedIndex(row, query ? index : getOriginalOrder(row)));
+      if (query) {
+        input.dataset.untitledRefinedActive = "true";
+        input.title = "Exact title matches are ranked first";
+      }
       lastExactKey = exactKey;
 
       if (previousPositions.size > 0) {
@@ -568,6 +838,8 @@
     animateSearchEntrance();
     animateProjectEntrance();
     decorateRows();
+    schedulePlayerSync();
+    if (favoritesOnly && getProjectPath() !== favoritesOnlyPath) setFavoritesOnly(false);
     if (!getSearchInput()) clearSelectedRow();
 
     const trackListChanged = mutations.some((mutation) =>
@@ -614,7 +886,7 @@
       const input = getSearchInput();
       if (!input) return;
 
-      const rows = getTrackRows();
+      const rows = getNavigableRows();
       if (rows.length === 0) return;
 
       const targetRow = event.target instanceof Element ? event.target.closest(TRACK_ROW_SELECTOR) : null;
@@ -661,11 +933,13 @@
   window.addEventListener("storage", (event) => {
     if (event.key !== FAVORITES_STORAGE_KEY) return;
     favorites = loadFavorites();
-    getTrackRows().forEach(renderFavorite);
+    favoriteIndex = buildFavoriteIndex();
+    refreshFavoriteViews();
   });
 
   installStyles();
   decorateRows();
+  syncPlayerFavorite();
   observer.observe(document.documentElement, { childList: true, subtree: true });
   animateSearchEntrance();
   animateProjectEntrance();
