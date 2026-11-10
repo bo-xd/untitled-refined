@@ -19,7 +19,7 @@
   const FAVORITE_ROW_ATTRIBUTE = `data-${PREFIX}-favorite`;
   const COLLAPSED_ROW_ATTRIBUTE = `data-${PREFIX}-collapsed`;
   const FILTERED_ROW_ATTRIBUTE = `data-${PREFIX}-filtered`;
-  const FAVORITES_ONLY_ATTRIBUTE = `data-${PREFIX}-favorites-only`;
+  const VIEW_HIDDEN_ATTRIBUTE = `data-${PREFIX}-view-hidden`;
 
   const FAVORITE_BUTTON_CLASS = `${PREFIX}-favorite`;
   const FAVORITE_INLINE_CLASS = `${PREFIX}-favorite-inline`;
@@ -31,12 +31,21 @@
   const LAUNCHER_CLASS = `${PREFIX}-launcher`;
   const PANEL_CLASS = `${PREFIX}-panel`;
   const TOAST_CLASS = `${PREFIX}-toast`;
+  const NEW_CLASS = `${PREFIX}-new`;
+  const EDIT_CLASS = `${PREFIX}-edit`;
+  const META_CLASS = `${PREFIX}-meta`;
+  const EDITOR_CLASS = `${PREFIX}-editor`;
+  const PLAYER_PLAYS_CLASS = `${PREFIX}-player-plays`;
 
   const STORAGE = {
     favorites: `${PREFIX}:favorites`,
     plays: `${PREFIX}:plays`,
     resume: `${PREFIX}:resume`,
     settings: `${PREFIX}:settings`,
+    tags: `${PREFIX}:tags`,
+    notes: `${PREFIX}:notes`,
+    projects: `${PREFIX}:projects`,
+    stats: `${PREFIX}:stats`,
   };
 
   const PLAY_COUNT_SECONDS = 30;
@@ -62,6 +71,14 @@
       '<svg viewBox="0 0 24 24" width="10" height="10" aria-hidden="true"><path d="M7 4.5v15l13-7.5z"/></svg>',
     layers:
       '<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="m12 3 9 5-9 5-9-5 9-5Z"/><path d="m3 13 9 5 9-5"/></svg>',
+    pencil:
+      '<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M4 20h4L19 9l-4-4L4 16v4Z"/><path d="m13.5 6.5 4 4"/></svg>',
+    note:
+      '<svg viewBox="0 0 24 24" width="12" height="12" aria-hidden="true"><path d="M6 3h9l4 4v14H6z"/><path d="M9 12h7M9 16h5"/></svg>',
+    sparkle:
+      '<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M12 3v4M12 17v4M3 12h4M17 12h4M6 6l2.5 2.5M15.5 15.5 18 18M6 18l2.5-2.5M15.5 8.5 18 6"/></svg>',
+    tag:
+      '<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M3 12V4h8l10 10-8 8L3 12Z"/><circle cx="7.5" cy="8.5" r="1.2"/></svg>',
     chart:
       '<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M5 20V10M12 20V4M19 20v-7"/></svg>',
   };
@@ -78,7 +95,9 @@
   let searchWasOpen = false;
   let pinnedPath = null;
   let favoritesOnly = false;
-  let favoritesOnlyPath = null;
+  let newOnly = false;
+  let tagFilter = null;
+  let viewPath = null;
   let groupsAvailable = false;
   let toolbar = null;
   let playerButton = null;
@@ -92,6 +111,15 @@
   let resumePromptShown = false;
   let playback = null;
   let lastResumeSave = { key: null, position: -Infinity };
+  let panelSearchQuery = "";
+  let queue = null;
+  let sleepTimer = null;
+  let loop = null;
+  let editor = null;
+  let playerPlays = null;
+  let pendingListen = 0;
+  let lastListenFlush = Date.now();
+  const visitSnapshots = new Map();
 
   const activeAnimations = new WeakMap();
   const animatedSearchInputs = new WeakSet();
@@ -101,7 +129,19 @@
   let favorites = loadFavorites();
   let favoriteIndex = buildFavoriteIndex();
   let plays = loadJSON(STORAGE.plays, {});
-  let settings = { groupVersions: false, sortByPlays: false, ...loadJSON(STORAGE.settings, {}) };
+  let settings = {
+    groupVersions: false,
+    sortByPlays: false,
+    resumePrompt: true,
+    shortcuts: true,
+    showPlays: true,
+    showNew: true,
+    ...loadJSON(STORAGE.settings, {}),
+  };
+  let tags = loadJSON(STORAGE.tags, {});
+  let notes = loadJSON(STORAGE.notes, {});
+  let projects = loadJSON(STORAGE.projects, {});
+  let stats = { seconds: 0, byProject: {}, ...loadJSON(STORAGE.stats, {}) };
 
   // ---------------------------------------------------------------------------
   // Generic helpers
@@ -153,7 +193,7 @@
       else if (name.startsWith("on")) element.addEventListener(name.slice(2).toLowerCase(), value);
       else element.setAttribute(name, value === true ? "" : String(value));
     }
-    for (const child of children.flat()) {
+    for (const child of children.flat(Infinity)) {
       if (child === null || child === undefined || child === false) continue;
       element.append(child instanceof Node ? child : document.createTextNode(String(child)));
     }
@@ -283,25 +323,28 @@
   // features. Untitled filters by title before the extension sees the list, so filters
   // can only narrow what its own search already returned.
   function parseQuery(rawQuery) {
-    const filters = { version: null, feature: false };
+    const filters = { version: null, feature: false, tag: null };
     const words = rawQuery.split(/\s+/).filter(Boolean);
     const remaining = [];
 
     for (const word of words) {
       const version = word.match(/^v(\d+)$/i);
       if (version) filters.version = Number(version[1]);
+      else if (/^#\S+/.test(word)) filters.tag = cleanTag(word);
       else if (/^(feat|ft)\.?$/i.test(word)) filters.feature = true;
       else remaining.push(word);
     }
 
-    filters.active = filters.version !== null || filters.feature;
+    filters.active = filters.version !== null || filters.feature || Boolean(filters.tag);
     return { text: remaining.join(" "), filters };
   }
 
-  function matchesFilters(title, filters) {
+  function matchesFilters(row, filters) {
     if (!filters.active) return true;
+    const title = getTitle(row);
     if (filters.version !== null && parseVersion(title).version !== filters.version) return false;
     if (filters.feature && !/\b(feat|ft)\b\.?/i.test(title)) return false;
+    if (filters.tag && !rowTags(row).includes(filters.tag)) return false;
     return true;
   }
 
@@ -350,7 +393,15 @@
       row.isConnected &&
       !row.hasAttribute(COLLAPSED_ROW_ATTRIBUTE) &&
       !row.hasAttribute(FILTERED_ROW_ATTRIBUTE) &&
-      (!favoritesOnly || isFavorite(row))
+      !row.hasAttribute(VIEW_HIDDEN_ATTRIBUTE)
+    );
+  }
+
+  function isHiddenByView(row) {
+    return (
+      (favoritesOnly && !isFavorite(row)) ||
+      (newOnly && !isNew(row)) ||
+      (Boolean(tagFilter) && !rowTags(row).includes(tagFilter))
     );
   }
 
@@ -464,7 +515,11 @@
   }
 
   function revealRow(row) {
-    if (favoritesOnly && !isFavorite(row)) setFavoritesOnly(false);
+    if (isHiddenByView(row)) {
+      setView({ favoritesOnly: false, newOnly: false, tagFilter: null });
+      row.removeAttribute(VIEW_HIDDEN_ATTRIBUTE);
+    }
+    row.removeAttribute(FILTERED_ROW_ATTRIBUTE);
 
     if (row.hasAttribute(COLLAPSED_ROW_ATTRIBUTE)) {
       expandedGroups.add(`${getProjectPath()}::${parseVersion(getTitle(row)).base}`);
@@ -729,16 +784,31 @@
 
     const identity = playKeyFor(player);
     if (!playback || playback.key !== identity.key) {
-      playback = { ...identity, path: player.path, project: player.project, last: player.position, listened: 0, counted: false };
+      flushListening();
+      const previous = playback;
+      playback = {
+        ...identity,
+        path: player.path,
+        project: player.project,
+        last: player.position,
+        listened: 0,
+        counted: false,
+        nearEnd: false,
+      };
+      handleTrackChange(previous, identity, player);
     }
 
     const delta = player.position - playback.last;
-    if (delta > 0 && delta <= 3) playback.listened += delta;
+    if (delta > 0 && delta <= 3) {
+      playback.listened += delta;
+      pendingListen += delta;
+    }
     if (delta < -5 && player.position < 3) {
       playback.listened = 0;
       playback.counted = false;
     }
     playback.last = player.position;
+    playback.nearEnd = Boolean(player.duration && player.position >= player.duration - 3);
 
     const threshold = player.duration ? Math.min(PLAY_COUNT_SECONDS, player.duration / 2) : PLAY_COUNT_SECONDS;
     if (!playback.counted && playback.listened >= threshold) {
@@ -749,6 +819,10 @@
     if (delta > 0) {
       hideResumePrompt();
       saveResumePoint(player, identity);
+      checkSleepTimer(player);
+      checkLoop(player, identity);
+      checkQueueEnd(player, identity);
+      if (Date.now() - lastListenFlush > 30000) flushListening();
     }
   }
 
@@ -776,6 +850,7 @@
   function maybeOfferResume() {
     if (resumePromptShown) return;
     resumePromptShown = true;
+    if (!settings.resumePrompt) return;
 
     const player = getPlayer();
     if (player?.title) return;
@@ -794,6 +869,387 @@
 
   function hideResumePrompt() {
     if (toastElement?.dataset.kind === "resume") hideToast();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Track metadata: tags, notes, and "new since last visit"
+  // ---------------------------------------------------------------------------
+
+  function trackId(row) {
+    return row.dataset.projectTrackId || rowKey(row);
+  }
+
+  function cleanTag(text) {
+    return String(text ?? "")
+      .trim()
+      .replace(/^#+/, "")
+      .toLowerCase()
+      .replace(/[^a-z0-9 _-]/g, "")
+      .replace(/\s+/g, "-")
+      .slice(0, 30);
+  }
+
+  function parseTagInput(text) {
+    return [...new Set(String(text ?? "").split(/[,\n]/).map(cleanTag).filter(Boolean))];
+  }
+
+  function rowTags(row) {
+    return tags[rowKey(row)] ?? [];
+  }
+
+  function allTags() {
+    const counts = new Map();
+    Object.values(tags).forEach((list) => list.forEach((tag) => counts.set(tag, (counts.get(tag) ?? 0) + 1)));
+    return new Map([...counts.entries()].sort((left, right) => right[1] - left[1]));
+  }
+
+  function setTrackMeta(key, tagList, note) {
+    if (tagList.length > 0) tags[key] = tagList;
+    else delete tags[key];
+    if (note) notes[key] = note;
+    else delete notes[key];
+    saveJSON(STORAGE.tags, tags);
+    saveJSON(STORAGE.notes, notes);
+    if (tagFilter && !Object.values(tags).some((list) => list.includes(tagFilter))) tagFilter = null;
+    refreshViews();
+  }
+
+  // The first time a project renders in this page session, remember which tracks were
+  // already known; anything else is "new since your last visit" for the whole session.
+  function recordVisit(path, rows) {
+    if (!path || rows.length === 0) return;
+
+    const previous = projects[path];
+    if (!visitSnapshots.has(path)) {
+      visitSnapshots.set(path, { hadHistory: Boolean(previous?.seen?.length), seen: new Set(previous?.seen ?? []) });
+    }
+
+    const ids = rows.map(trackId);
+    const signature = `${ids.length}:${getProjectName()}`;
+    if (previous?.signature === signature) return;
+
+    projects[path] = {
+      name: getProjectName() || previous?.name || "",
+      tracks: rows.map(getTitle),
+      seen: [...new Set([...(previous?.seen ?? []), ...ids])],
+      lastVisit: Date.now(),
+      signature,
+    };
+    saveJSON(STORAGE.projects, projects);
+  }
+
+  function isNew(row) {
+    if (!settings.showNew) return false;
+    const snapshot = visitSnapshots.get(getProjectPath());
+    return Boolean(snapshot?.hadHistory && !snapshot.seen.has(trackId(row)));
+  }
+
+  function editTarget() {
+    if (selectedRow?.isConnected && getProjectPath()) {
+      return { key: rowKey(selectedRow), label: getTitle(selectedRow) };
+    }
+    const player = getPlayer();
+    if (player?.title && player.path) {
+      const identity = playKeyFor(player);
+      return { key: identity.key, label: identity.label };
+    }
+    return null;
+  }
+
+  function closeEditor() {
+    editor?.remove();
+    editor = null;
+  }
+
+  function openEditor(target) {
+    if (!target) {
+      toast("Select a track (J/K) or play one first");
+      return;
+    }
+    closeEditor();
+
+    const tagInput = el("input", {
+      type: "text",
+      className: `${EDITOR_CLASS}-input`,
+      placeholder: "gym, best, demo",
+      "aria-label": "Tags, separated by commas",
+    });
+    tagInput.value = (tags[target.key] ?? []).join(", ");
+
+    const noteInput = el("textarea", {
+      className: `${EDITOR_CLASS}-input`,
+      rows: 3,
+      placeholder: "Add a note…",
+      "aria-label": "Note",
+    });
+    noteInput.value = notes[target.key] ?? "";
+
+    const save = () => {
+      setTrackMeta(target.key, parseTagInput(tagInput.value), noteInput.value.trim());
+      closeEditor();
+      toast(`Saved “${target.label}”`);
+    };
+
+    const suggestions = [...allTags().keys()].slice(0, 12).map((tag) =>
+      el(
+        "button",
+        {
+          type: "button",
+          className: `${EDITOR_CLASS}-chip`,
+          onClick: () => {
+            const current = parseTagInput(tagInput.value);
+            const next = current.includes(tag) ? current.filter((item) => item !== tag) : [...current, tag];
+            tagInput.value = next.join(", ");
+            tagInput.focus();
+          },
+        },
+        `#${tag}`,
+      ),
+    );
+
+    editor = el(
+      "div",
+      {
+        className: `${EDITOR_CLASS} bg-playbar backdrop-blur-2xl shadow-2xl`,
+        role: "dialog",
+        "aria-label": `Edit ${target.label}`,
+        [CONTROL_ATTRIBUTE]: true,
+      },
+      el("h3", { className: `${EDITOR_CLASS}-title` }, target.label),
+      el("label", { className: `${EDITOR_CLASS}-label` }, "Tags", tagInput),
+      suggestions.length > 0 && el("div", { className: `${EDITOR_CLASS}-chips` }, suggestions),
+      el("label", { className: `${EDITOR_CLASS}-label` }, "Note", noteInput),
+      el(
+        "div",
+        { className: `${EDITOR_CLASS}-actions` },
+        el("span", { className: `${EDITOR_CLASS}-hint` }, "Enter saves tags · Ctrl+Enter saves"),
+        el("button", { type: "button", className: `${EDITOR_CLASS}-button`, onClick: closeEditor }, "Cancel"),
+        el("button", { type: "button", className: `${EDITOR_CLASS}-button ${EDITOR_CLASS}-primary`, onClick: save }, "Save"),
+      ),
+    );
+
+    // Keep typing (Space, arrows) away from Untitled's own player shortcuts.
+    editor.addEventListener("keydown", (event) => {
+      event.stopPropagation();
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeEditor();
+      } else if (event.key === "Enter" && (event.target === tagInput || event.ctrlKey || event.metaKey)) {
+        event.preventDefault();
+        save();
+      }
+    });
+
+    document.body.append(editor);
+    tagInput.focus();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Queue, sleep timer, loop, and version compare
+  // ---------------------------------------------------------------------------
+
+  function pausePlayback() {
+    const player = getPlayer();
+    if (player?.playButton?.getAttribute("aria-label") === "Pause") player.playButton.click();
+  }
+
+  function shuffled(items) {
+    const copy = [...items];
+    for (let index = copy.length - 1; index > 0; index -= 1) {
+      const swap = Math.floor(Math.random() * (index + 1));
+      [copy[index], copy[swap]] = [copy[swap], copy[index]];
+    }
+    return copy;
+  }
+
+  function startQueue({ shuffle = false } = {}) {
+    if (favorites.length === 0) {
+      toast("Add some favorites first");
+      return;
+    }
+
+    const ordered = [...favorites].sort(
+      (left, right) =>
+        (left.project || "").localeCompare(right.project || "") || (left.added ?? 0) - (right.added ?? 0),
+    );
+    queue = { items: shuffle ? shuffled(ordered) : ordered, index: -1, shuffle, expecting: null };
+    toast(`Playing ${queue.items.length} favorite${queue.items.length === 1 ? "" : "s"}${shuffle ? ", shuffled" : ""}`);
+    advanceQueue(1);
+  }
+
+  function stopQueue(message) {
+    if (!queue) return;
+    queue = null;
+    if (message) toast(message);
+    if (panel) renderPanel();
+  }
+
+  function advanceQueue(step) {
+    if (!queue) return;
+
+    const nextIndex = Math.max(0, queue.index + step);
+    if (nextIndex >= queue.items.length) {
+      stopQueue("Finished playing your favorites");
+      return;
+    }
+
+    queue.index = nextIndex;
+    const entry = queue.items[nextIndex];
+    queue.expecting = { path: entry.path, titles: entry.titles, since: Date.now() };
+    goToTrack(entry, { play: true });
+    if (panel) renderPanel();
+  }
+
+  function isQueueTrack(identity) {
+    const entry = queue?.items[queue.index];
+    return Boolean(entry && entry.path === playback?.path && entry.titles.some((title) => identity.titles.includes(title)));
+  }
+
+  // Runs when the playing track changes. Our own queue navigation is expected; a change
+  // right at the end of a track is Untitled auto-advancing; anything else is the user
+  // choosing another track, which ends the queue.
+  function handleTrackChange(previous, identity, player) {
+    if (loop && loop.key !== identity.key) loop = null;
+
+    if (sleepTimer?.endOfTrack && previous && sleepTimer.endOfTrack === previous.key) {
+      sleepTimer = null;
+      pausePlayback();
+      toast("Sleep timer: paused after the track ended");
+    }
+
+    if (!queue || !previous) return;
+
+    if (queue.expecting) {
+      const arrived =
+        queue.expecting.path === player.path && identity.titles.some((title) => queue.expecting.titles.includes(title));
+      if (arrived || Date.now() - queue.expecting.since > 20000) queue.expecting = null;
+      return;
+    }
+
+    if (previous.nearEnd) advanceQueue(1);
+    else stopQueue("Queue stopped because another track started");
+  }
+
+  function checkQueueEnd(player, identity) {
+    if (!queue || queue.expecting || !player.duration) return;
+    if (player.position >= player.duration - 1 && isQueueTrack(identity)) advanceQueue(1);
+  }
+
+  function setSleepTimer(option) {
+    if (option === null) {
+      sleepTimer = null;
+      toast("Sleep timer off");
+    } else if (option === "end") {
+      const player = getPlayer();
+      if (!player?.title) {
+        toast("Nothing is playing");
+        return;
+      }
+      sleepTimer = { endOfTrack: playKeyFor(player).key };
+      toast("Pausing when this track ends");
+    } else {
+      sleepTimer = { until: Date.now() + option * 60000, minutes: option };
+      toast(`Pausing in ${option} minutes`);
+    }
+    if (panel) renderPanel();
+  }
+
+  function checkSleepTimer(player) {
+    if (!sleepTimer) return;
+    const ended = sleepTimer.endOfTrack && player.duration && player.position >= player.duration - 1;
+    const expired = sleepTimer.until && Date.now() >= sleepTimer.until;
+    if (!ended && !expired) return;
+    sleepTimer = null;
+    pausePlayback();
+    toast("Sleep timer: paused playback");
+    if (panel) renderPanel();
+  }
+
+  function setLoopPoint(which) {
+    const player = getPlayer();
+    if (!player?.title || player.position === null) {
+      toast("Nothing is playing");
+      return;
+    }
+
+    const key = playKeyFor(player).key;
+    if (which === "clear") {
+      loop = null;
+      toast("Loop off");
+    } else if (which === "start") {
+      loop = { key, start: player.position, end: null, seeking: false };
+      toast(`Loop starts at ${formatClock(player.position)}. Press ] where it should end`);
+    } else if (!loop || loop.key !== key) {
+      toast("Press [ first to set where the loop starts");
+    } else if (player.position <= loop.start + 1) {
+      toast("The loop end must be after its start");
+    } else {
+      loop.end = player.position;
+      toast(`Looping ${formatClock(loop.start)}–${formatClock(loop.end)} · press \\ to stop`);
+    }
+  }
+
+  function checkLoop(player, identity) {
+    if (!loop?.end || loop.seeking || loop.key !== identity.key || player.position < loop.end) return;
+
+    loop.seeking = true;
+    seekPlayer(loop.start).then((moved) => {
+      if (!loop) return;
+      loop.seeking = false;
+      if (!moved) {
+        loop = null;
+        toast("Couldn’t loop: jumping back in the track isn’t working");
+      }
+    });
+  }
+
+  // A/B compare: switch to the next version of the same song at the same position.
+  function switchVersion() {
+    const player = getPlayer();
+    if (!player?.title || !player.path) {
+      toast("Nothing is playing");
+      return;
+    }
+    if (player.path !== getProjectPath()) {
+      toast("Open the song’s project to compare its versions");
+      return;
+    }
+
+    const current = findRowByTitles(getPlayerTitles(player.title));
+    const base = parseVersion(current ? getTitle(current) : player.title).base;
+    const versions = getTrackRows()
+      .filter((row) => parseVersion(getTitle(row)).base === base)
+      .sort((left, right) => getOriginalOrder(left) - getOriginalOrder(right));
+
+    if (versions.length < 2 || !current) {
+      toast("This song has no other versions here");
+      return;
+    }
+
+    const next = versions[(versions.indexOf(current) + 1) % versions.length];
+    const position = player.position ?? 0;
+    toast(`Switching to “${getTitle(next)}”${position > 2 ? ` at ${formatClock(position)}` : ""}`);
+    goToTrack(
+      { path: player.path, titles: [normalize(getTitle(next))], label: getTitle(next) },
+      { play: true, seekTo: position > 2 ? position : null },
+    );
+  }
+
+  function flushListening() {
+    if (pendingListen <= 0 || !playback) return;
+
+    stats.seconds = (stats.seconds ?? 0) + pendingListen;
+    stats.byProject = stats.byProject ?? {};
+    stats.byProject[playback.path] = (stats.byProject[playback.path] ?? 0) + pendingListen;
+    saveJSON(STORAGE.stats, stats);
+
+    if (plays[playback.key]) {
+      plays[playback.key].seconds = (plays[playback.key].seconds ?? 0) + pendingListen;
+      saveJSON(STORAGE.plays, plays);
+    }
+
+    pendingListen = 0;
+    lastListenFlush = Date.now();
   }
 
   // ---------------------------------------------------------------------------
@@ -821,6 +1277,17 @@
         toggleFavorite(row);
       },
     });
+    const edit = controlButton(EDIT_CLASS, {
+      html: ICONS.pencil,
+      title: "Tags and note (E)",
+      "aria-label": `Edit tags and note for ${getTitle(row)}`,
+      onClick: (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        openEditor({ key: rowKey(row), label: getTitle(row) });
+      },
+    });
+    const newBadge = el("span", { className: NEW_CLASS, [CONTROL_ATTRIBUTE]: true, hidden: true, title: "Added since your last visit" }, "New");
     const playsBadge = el("span", { className: PLAYS_CLASS, [CONTROL_ATTRIBUTE]: true, hidden: true });
     const versionsBadge = controlButton(VERSIONS_CLASS, {
       hidden: true,
@@ -838,10 +1305,15 @@
     const actions = getRowActions(row);
     if (actions) {
       heart.classList.add(FAVORITE_INLINE_CLASS);
-      actions.prepend(versionsBadge, playsBadge, heart);
+      edit.classList.add(FAVORITE_INLINE_CLASS);
+      actions.prepend(newBadge, versionsBadge, playsBadge, edit, heart);
     } else {
-      row.append(versionsBadge, playsBadge, heart);
+      row.append(newBadge, versionsBadge, playsBadge, edit, heart);
     }
+
+    // Tags and note show under the title; display only (the title area is the play button).
+    const titleColumn = row.querySelector("h3")?.parentElement;
+    if (titleColumn) titleColumn.append(el("div", { className: META_CLASS, [CONTROL_ATTRIBUTE]: true, hidden: true }));
     return true;
   }
 
@@ -852,16 +1324,36 @@
     const heart = row.querySelector(`.${FAVORITE_BUTTON_CLASS}`);
     if (heart) describeFavorite(heart, favorite, getTitle(row));
 
+    const newBadge = row.querySelector(`.${NEW_CLASS}`);
+    if (newBadge) newBadge.hidden = !isNew(row);
+
     const playsBadge = row.querySelector(`.${PLAYS_CLASS}`);
     if (playsBadge) {
       const count = getPlayCount(row);
-      playsBadge.hidden = count === 0;
+      playsBadge.hidden = count === 0 || !settings.showPlays;
       const text = String(count);
       if (playsBadge.dataset.count !== text) {
         playsBadge.dataset.count = text;
         playsBadge.innerHTML = `${ICONS.play}<span>${text}</span>`;
         playsBadge.title = `Played ${count} time${count === 1 ? "" : "s"}`;
       }
+    }
+
+    const meta = row.querySelector(`.${META_CLASS}`);
+    if (meta) {
+      const key = rowKey(row);
+      const tagList = tags[key] ?? [];
+      const note = notes[key] ?? "";
+      const signature = `${tagList.join(",")}|${note}`;
+      if (meta.dataset.signature !== signature) {
+        meta.dataset.signature = signature;
+        meta.replaceChildren(
+          ...tagList.map((tag) => el("span", { className: `${META_CLASS}-tag` }, `#${tag}`)),
+          note ? el("span", { className: `${META_CLASS}-note`, title: note, html: ICONS.note }) : "",
+          note ? el("span", { className: `${META_CLASS}-note-text`, title: note }, note) : "",
+        );
+      }
+      meta.hidden = tagList.length === 0 && !note;
     }
   }
 
@@ -879,7 +1371,7 @@
 
   function refreshViews() {
     getTrackRows().forEach(renderRow);
-    if (favoritesOnly && countProjectFavorites() === 0) setFavoritesOnly(false);
+    if (favoritesOnly && countProjectFavorites() === 0) favoritesOnly = false;
     syncPlayer();
     if (panel) renderPanel();
     scheduleRanking();
@@ -911,12 +1403,16 @@
   // Toolbar above the track list
   // ---------------------------------------------------------------------------
 
-  function setFavoritesOnly(enabled) {
-    favoritesOnly = enabled;
-    favoritesOnlyPath = enabled ? getProjectPath() : null;
-    document.documentElement.toggleAttribute(FAVORITES_ONLY_ATTRIBUTE, enabled);
-    if (enabled && selectedRow && !isFavorite(selectedRow)) clearSelectedRow();
+  function setView(patch) {
+    if ("favoritesOnly" in patch) favoritesOnly = patch.favoritesOnly;
+    if ("newOnly" in patch) newOnly = patch.newOnly;
+    if ("tagFilter" in patch) tagFilter = patch.tagFilter;
+    viewPath = favoritesOnly || newOnly || tagFilter ? getProjectPath() : null;
     scheduleRanking();
+  }
+
+  function setFavoritesOnly(enabled) {
+    setView({ favoritesOnly: enabled });
   }
 
   function pill(id, { icon, label, pressed, title, onClick }) {
@@ -936,10 +1432,14 @@
     return button;
   }
 
-  function renderToolbar(list, { query, resultCount }) {
+  function renderToolbar(list, { query, resultCount, rows }) {
     const favoriteCount = countProjectFavorites();
     const hasPlays = projectHasPlays();
-    const show = Boolean(list) && (favoriteCount > 0 || groupsAvailable || hasPlays || query);
+    const newCount = settings.showNew ? rows.filter(isNew).length : 0;
+    const tagCounts = new Map();
+    rows.forEach((row) => rowTags(row).forEach((tag) => tagCounts.set(tag, (tagCounts.get(tag) ?? 0) + 1)));
+    const show =
+      Boolean(list) && (favoriteCount > 0 || groupsAvailable || hasPlays || query || newCount > 0 || tagCounts.size > 0 || newOnly);
 
     if (!show) {
       toolbar?.remove();
@@ -959,6 +1459,30 @@
         onClick: () => setFavoritesOnly(!favoritesOnly),
       });
     }
+    if (newCount > 0 || newOnly) {
+      wanted.add("new");
+      pill("new", {
+        icon: "sparkle",
+        label: `New · ${newCount}`,
+        pressed: newOnly,
+        title: newOnly ? "Show all tracks" : "Show only tracks added since your last visit",
+        onClick: () => setView({ newOnly: !newOnly }),
+      });
+    }
+    [...tagCounts.entries()]
+      .sort((left, right) => right[1] - left[1])
+      .slice(0, 8)
+      .forEach(([tag, count]) => {
+        const id = `tag-${tag}`;
+        wanted.add(id);
+        pill(id, {
+          icon: "tag",
+          label: `#${tag} · ${count}`,
+          pressed: tagFilter === tag,
+          title: tagFilter === tag ? "Show all tracks" : `Show only tracks tagged #${tag}`,
+          onClick: () => setView({ tagFilter: tagFilter === tag ? null : tag }),
+        });
+      });
     if (groupsAvailable && !query) {
       wanted.add("versions");
       pill("versions", {
@@ -1007,8 +1531,8 @@
     if (!launcher) {
       launcher = controlButton(`${LAUNCHER_CLASS} bg-playbar backdrop-blur-2xl shadow-2xl`, {
         html: ICONS.heart,
-        "aria-label": "Favorites and recently played (Shift+F)",
-        title: "Favorites and recently played (Shift+F)",
+        "aria-label": "Untitled Refined: favorites, recent, search, stats (Shift+F)",
+        title: "Favorites, recent, search, stats (Shift+F)",
         onClick: (event) => {
           event.stopPropagation();
           togglePanel();
@@ -1017,10 +1541,12 @@
     }
     if (!launcher.isConnected) document.body.append(launcher);
     if (panel && !panel.isConnected) document.body.append(panel);
+    if (editor && !editor.isConnected) document.body.append(editor);
     launcher.setAttribute("aria-expanded", String(Boolean(panel)));
+    launcher.classList.toggle(`${LAUNCHER_CLASS}-busy`, Boolean(queue || sleepTimer || loop?.end));
   }
 
-  function togglePanel(force) {
+  function togglePanel(force, tab) {
     const open = force ?? !panel;
     if (!open) {
       panel?.remove();
@@ -1029,11 +1555,22 @@
       return;
     }
 
+    if (tab) panelTab = tab;
+    if (panel) {
+      renderPanel();
+      return;
+    }
+
     panel = el("div", {
       className: `${PANEL_CLASS} bg-playbar backdrop-blur-2xl shadow-2xl`,
       role: "dialog",
       "aria-label": "Untitled Refined",
       [CONTROL_ATTRIBUTE]: true,
+    });
+    // Keep typing in the panel away from Untitled's own player shortcuts.
+    panel.addEventListener("keydown", (event) => {
+      if (isEditableTarget(event.target)) event.stopPropagation();
+      if (event.key === "Escape") togglePanel(false);
     });
     document.body.append(panel);
     renderPanel();
@@ -1080,11 +1617,48 @@
     goToTrack(target, { play: true });
   }
 
+  function panelButton(label, onClick, { title, pressed, primary } = {}) {
+    return el(
+      "button",
+      {
+        type: "button",
+        className: `${PANEL_CLASS}-action${primary ? ` ${PANEL_CLASS}-primary` : ""}`,
+        title,
+        "aria-pressed": pressed === undefined ? undefined : String(Boolean(pressed)),
+        onClick,
+      },
+      label,
+    );
+  }
+
+  function formatDuration(seconds) {
+    const minutes = Math.round((seconds ?? 0) / 60);
+    if (minutes < 60) return `${minutes} min`;
+    return `${Math.floor(minutes / 60)} h ${minutes % 60} min`;
+  }
+
   function renderFavoritesTab() {
     if (favorites.length === 0) {
       return el("p", { className: `${PANEL_CLASS}-empty` }, "No favorites yet. Tap the heart on a track or in the player.");
     }
 
+    const controls = queue
+      ? el(
+          "div",
+          { className: `${PANEL_CLASS}-bar` },
+          el("span", {}, `Playing ${queue.index + 1} of ${queue.items.length}${queue.shuffle ? " · shuffled" : ""}`),
+          panelButton("Previous", () => advanceQueue(-1)),
+          panelButton("Next", () => advanceQueue(1)),
+          panelButton("Stop", () => stopQueue()),
+        )
+      : el(
+          "div",
+          { className: `${PANEL_CLASS}-bar` },
+          panelButton("▶ Play all", () => startQueue(), { primary: true }),
+          panelButton("Shuffle", () => startQueue({ shuffle: true })),
+        );
+
+    const current = queue?.items[queue.index];
     const byProject = new Map();
     [...favorites]
       .sort((left, right) => (right.added ?? 0) - (left.added ?? 0))
@@ -1097,6 +1671,7 @@
     return el(
       "div",
       {},
+      controls,
       [...byProject.entries()].map(([project, entries]) =>
         el(
           "section",
@@ -1106,13 +1681,15 @@
             "ul",
             {},
             entries.map((entry) => {
-              const count = plays[`${entry.path}::${entry.titles[0]}`]?.count ?? 0;
-              return trackItem({
+              const play = plays[`${entry.path}::${entry.titles[0]}`];
+              const item = trackItem({
                 label: entry.label || entry.titles[0],
-                detail: count ? `${count} play${count === 1 ? "" : "s"}` : "",
+                detail: play?.count ? `${play.count} play${play.count === 1 ? "" : "s"}` : "",
                 onPlay: () => playFromPanel(entry),
                 onRemove: () => toggleFavoriteTitles(entry.path, entry.titles, entry),
               });
+              if (entry === current) item.classList.add(`${PANEL_CLASS}-current`);
+              return item;
             }),
           ),
         ),
@@ -1123,7 +1700,7 @@
   function renderRecentTab() {
     const recent = Object.values(plays)
       .sort((left, right) => right.last - left.last)
-      .slice(0, 20);
+      .slice(0, 25);
 
     if (recent.length === 0) {
       return el("p", { className: `${PANEL_CLASS}-empty` }, "Tracks you listen to for 30 seconds or more show up here.");
@@ -1142,9 +1719,214 @@
     );
   }
 
+  // Searches every project you've opened (titles are remembered per project), plus tags
+  // and notes when the query starts with # or matches a note.
+  function searchEverywhere(query) {
+    const normalizedQuery = normalize(query);
+    const tagQuery = query.trim().startsWith("#") ? cleanTag(query) : null;
+    const results = [];
+
+    Object.entries(projects).forEach(([path, project]) => {
+      (project.tracks ?? []).forEach((title) => {
+        const key = `${path}::${normalize(title)}`;
+        let value;
+        if (tagQuery) {
+          if (!(tags[key] ?? []).some((tag) => tag.startsWith(tagQuery))) return;
+          value = 0;
+        } else {
+          value = score(title, query);
+          const note = notes[key];
+          if (value >= 600 && note && normalize(note).includes(normalizedQuery)) value = 500;
+          if (value >= 600) return;
+        }
+        results.push({ path, title, project: project.name, value, key });
+      });
+    });
+
+    return results.sort((left, right) => left.value - right.value || left.title.localeCompare(right.title)).slice(0, 40);
+  }
+
+  function renderSearchTab() {
+    const input = el("input", {
+      type: "search",
+      className: `${PANEL_CLASS}-search`,
+      placeholder: "Search every project you’ve opened…",
+      "aria-label": "Search all projects",
+    });
+    input.value = panelSearchQuery;
+    const results = el("div", { className: `${PANEL_CLASS}-results` });
+
+    const update = () => {
+      panelSearchQuery = input.value;
+      const query = input.value.trim();
+      if (!query) {
+        const count = Object.values(projects).reduce((total, project) => total + (project.tracks?.length ?? 0), 0);
+        results.replaceChildren(
+          el(
+            "p",
+            { className: `${PANEL_CLASS}-empty` },
+            count
+              ? `Searching ${count} tracks across ${Object.keys(projects).length} project${Object.keys(projects).length === 1 ? "" : "s"} you’ve opened. Use #tag to search your tags.`
+              : "Open a project and its tracks become searchable here.",
+          ),
+        );
+        return;
+      }
+      const found = searchEverywhere(query);
+      results.replaceChildren(
+        found.length === 0
+          ? el("p", { className: `${PANEL_CLASS}-empty` }, "No matches")
+          : el(
+              "ul",
+              {},
+              found.map((result) =>
+                trackItem({
+                  label: result.title,
+                  detail: [result.project, ...(tags[result.key] ?? []).map((tag) => `#${tag}`)].filter(Boolean).join(" · "),
+                  onPlay: () => playFromPanel({ path: result.path, titles: [normalize(result.title)], label: result.title }),
+                }),
+              ),
+            ),
+      );
+    };
+
+    input.addEventListener("input", update);
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") results.querySelector(`.${PANEL_CLASS}-play`)?.click();
+    });
+    update();
+    return el("div", {}, input, results);
+  }
+
+  function renderStatsTab() {
+    const entries = Object.values(plays);
+    if (entries.length === 0) {
+      return el("p", { className: `${PANEL_CLASS}-empty` }, "Listen to a few tracks and your stats show up here.");
+    }
+
+    const totalPlays = entries.reduce((total, entry) => total + entry.count, 0);
+    const topTracks = [...entries].sort((left, right) => right.count - left.count).slice(0, 10);
+    const byProject = new Map();
+    entries.forEach((entry) => {
+      const name = entry.project || "Unknown project";
+      byProject.set(name, (byProject.get(name) ?? 0) + entry.count);
+    });
+    const topProjects = [...byProject.entries()].sort((left, right) => right[1] - left[1]).slice(0, 5);
+    const max = topTracks[0]?.count ?? 1;
+
+    const figure = (value, label) =>
+      el("div", { className: `${PANEL_CLASS}-figure` }, el("strong", {}, value), el("span", {}, label));
+
+    return el(
+      "div",
+      {},
+      el(
+        "div",
+        { className: `${PANEL_CLASS}-figures` },
+        figure(String(totalPlays), "plays"),
+        figure(formatDuration(stats.seconds), "listened"),
+        figure(String(entries.length), "tracks"),
+      ),
+      el("h4", { className: `${PANEL_CLASS}-group` }, "Top tracks"),
+      el(
+        "ul",
+        {},
+        topTracks.map((entry) => {
+          const item = trackItem({
+            label: entry.label,
+            detail: `${entry.count}×${entry.seconds ? ` · ${formatDuration(entry.seconds)}` : ""}${entry.project ? ` · ${entry.project}` : ""}`,
+            onPlay: () => playFromPanel(entry),
+          });
+          item.style.setProperty("--bar", `${Math.round((entry.count / max) * 100)}%`);
+          item.classList.add(`${PANEL_CLASS}-ranked`);
+          return item;
+        }),
+      ),
+      el("h4", { className: `${PANEL_CLASS}-group` }, "Top projects"),
+      el(
+        "ul",
+        { className: `${PANEL_CLASS}-plain` },
+        topProjects.map(([name, count]) =>
+          el("li", {}, el("span", {}, name), el("span", { className: `${PANEL_CLASS}-detail` }, `${count} plays`)),
+        ),
+      ),
+    );
+  }
+
+  const SHORTCUTS = [
+    ["L", "Favorite the playing track"],
+    ["Shift+N / Shift+P", "Next / previous (in the queue when one is playing)"],
+    ["J / K, Enter", "Move through the list, play"],
+    [".", "Jump to the playing track"],
+    ["E", "Tags and note for the selected or playing track"],
+    ["V", "Switch to the next version at the same spot"],
+    ["[  ]  \\", "Loop start, loop end, stop looping"],
+    ["Shift+F", "Open this panel"],
+    ["?", "Show these shortcuts"],
+    ["Space, ←/→, ↑/↓", "Untitled’s own: play/pause, skip 10s, volume"],
+  ];
+
+  function renderMoreTab() {
+    let sleepStatus = "Off";
+    if (sleepTimer?.until) sleepStatus = `Pausing in ${Math.max(1, Math.ceil((sleepTimer.until - Date.now()) / 60000))} min`;
+    if (sleepTimer?.endOfTrack) sleepStatus = "Pausing when this track ends";
+
+    const toggle = (key, label, detail) => {
+      const input = el("input", { type: "checkbox" });
+      input.checked = Boolean(settings[key]);
+      input.addEventListener("change", () => {
+        settings = { ...settings, [key]: input.checked };
+        saveJSON(STORAGE.settings, settings);
+        refreshViews();
+      });
+      return el(
+        "label",
+        { className: `${PANEL_CLASS}-setting` },
+        input,
+        el("span", {}, el("strong", {}, label), el("small", {}, detail)),
+      );
+    };
+
+    return el(
+      "div",
+      {},
+      el("h4", { className: `${PANEL_CLASS}-group` }, `Sleep timer · ${sleepStatus}`),
+      el(
+        "div",
+        { className: `${PANEL_CLASS}-bar` },
+        [15, 30, 60].map((minutes) =>
+          panelButton(`${minutes} min`, () => setSleepTimer(minutes), { pressed: sleepTimer?.minutes === minutes }),
+        ),
+        panelButton("End of track", () => setSleepTimer("end"), { pressed: Boolean(sleepTimer?.endOfTrack) }),
+        sleepTimer && panelButton("Off", () => setSleepTimer(null)),
+      ),
+      el("h4", { className: `${PANEL_CLASS}-group` }, "Settings"),
+      toggle("resumePrompt", "Offer to resume", "After a reload, continue the last track"),
+      toggle("shortcuts", "Keyboard shortcuts", "L, J/K, E, V, [ ] and the rest"),
+      toggle("showPlays", "Play counts on tracks", "The small ▶ number on each row"),
+      toggle("showNew", "Mark new tracks", "“New” on tracks added since your last visit"),
+      el("h4", { className: `${PANEL_CLASS}-group` }, "Your data"),
+      el(
+        "div",
+        { className: `${PANEL_CLASS}-bar` },
+        panelButton("Copy favorites", copyFavorites, { title: "Copy favorites as text" }),
+        panelButton("Back up", downloadBackup, { title: "Download favorites, tags, notes and play counts" }),
+        panelButton("Restore", restoreBackup, { title: "Restore from a backup file" }),
+      ),
+      el("h4", { className: `${PANEL_CLASS}-group` }, "Shortcuts"),
+      el(
+        "dl",
+        { className: `${PANEL_CLASS}-shortcuts` },
+        SHORTCUTS.map(([keys, label]) => [el("dt", {}, keys), el("dd", {}, label)]),
+      ),
+    );
+  }
+
   function renderPanel() {
     if (!panel) return;
-    const scrollTop = panel.querySelector(`.${PANEL_CLASS}-body`)?.scrollTop ?? 0;
+    const body = panel.querySelector(`.${PANEL_CLASS}-body`);
+    const scrollTop = body?.scrollTop ?? 0;
+    const searchFocused = document.activeElement?.classList?.contains(`${PANEL_CLASS}-search`);
 
     const tab = (id, label) =>
       el(
@@ -1157,46 +1939,50 @@
           onClick: () => {
             panelTab = id;
             renderPanel();
+            if (id === "search") panel.querySelector(`.${PANEL_CLASS}-search`)?.focus();
           },
         },
         label,
       );
 
-    const footerButton = (label, onClick, title) =>
-      el("button", { type: "button", className: `${PANEL_CLASS}-action`, title, onClick }, label);
+    const content = {
+      favorites: renderFavoritesTab,
+      recent: renderRecentTab,
+      search: renderSearchTab,
+      stats: renderStatsTab,
+      more: renderMoreTab,
+    }[panelTab] ?? renderFavoritesTab;
 
     panel.replaceChildren(
       el(
         "header",
         { className: `${PANEL_CLASS}-header` },
-        el("div", { role: "tablist" }, tab("favorites", `Favorites · ${favorites.length}`), tab("recent", "Recent")),
+        el(
+          "div",
+          { role: "tablist", className: `${PANEL_CLASS}-tabs` },
+          tab("favorites", `Favorites${favorites.length ? ` ${favorites.length}` : ""}`),
+          tab("recent", "Recent"),
+          tab("search", "Search"),
+          tab("stats", "Stats"),
+          tab("more", "More"),
+        ),
         el(
           "button",
           { type: "button", className: `${PANEL_CLASS}-close`, "aria-label": "Close", onClick: () => togglePanel(false) },
           "×",
         ),
       ),
-      el("div", { className: `${PANEL_CLASS}-body` }, panelTab === "favorites" ? renderFavoritesTab() : renderRecentTab()),
-      el(
-        "footer",
-        { className: `${PANEL_CLASS}-footer` },
-        el(
-          "div",
-          { className: `${PANEL_CLASS}-actions` },
-          footerButton("Copy list", copyFavorites, "Copy favorites as text"),
-          footerButton("Back up", downloadBackup, "Download favorites and play counts"),
-          footerButton("Restore", restoreBackup, "Restore from a backup file"),
-        ),
-        el(
-          "p",
-          { className: `${PANEL_CLASS}-hint` },
-          "L like playing · . jump to playing · Shift+N/P next/prev · J/K move · Enter play · Shift+F this panel",
-        ),
-      ),
+      el("div", { className: `${PANEL_CLASS}-body` }, content()),
     );
 
-    const body = panel.querySelector(`.${PANEL_CLASS}-body`);
-    if (body) body.scrollTop = scrollTop;
+    const nextBody = panel.querySelector(`.${PANEL_CLASS}-body`);
+    if (nextBody) nextBody.scrollTop = scrollTop;
+    if (searchFocused) {
+      const input = panel.querySelector(`.${PANEL_CLASS}-search`);
+      input?.focus();
+      input?.setSelectionRange(input.value.length, input.value.length);
+    }
+    ensureLauncher();
   }
 
   async function copyFavorites() {
@@ -1215,7 +2001,8 @@
   }
 
   function downloadBackup() {
-    const data = { app: PREFIX, version: 1, exported: new Date().toISOString(), favorites, plays, settings };
+    flushListening();
+    const data = { app: PREFIX, version: 2, exported: new Date().toISOString(), favorites, plays, settings, tags, notes, stats };
     const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: "application/json" }));
     const link = el("a", { href: url, download: `untitled-refined-backup-${new Date().toISOString().slice(0, 10)}.json` });
     document.body.append(link);
@@ -1251,9 +2038,20 @@
           const current = plays[key];
           if (!current || entry.count > current.count) plays[key] = { ...entry, last: Math.max(entry.last ?? 0, current?.last ?? 0) };
         });
+        Object.entries(data.tags ?? {}).forEach(([key, list]) => {
+          if (Array.isArray(list)) tags[key] = [...new Set([...(tags[key] ?? []), ...list.map(cleanTag).filter(Boolean)])];
+        });
+        Object.entries(data.notes ?? {}).forEach(([key, note]) => {
+          if (typeof note === "string" && note && !notes[key]) notes[key] = note;
+        });
+        if (data.stats && (data.stats.seconds ?? 0) > (stats.seconds ?? 0)) stats = { ...stats, ...data.stats };
+
         saveJSON(STORAGE.plays, plays);
+        saveJSON(STORAGE.tags, tags);
+        saveJSON(STORAGE.notes, notes);
+        saveJSON(STORAGE.stats, stats);
         setFavorites(merged);
-        toast(`Restored ${added} new favorite${added === 1 ? "" : "s"}`);
+        toast(`Restored ${added} new favorite${added === 1 ? "" : "s"}, plus tags, notes and plays`);
       } catch {
         toast("That file isn’t an Untitled Refined backup");
       }
@@ -1347,13 +2145,32 @@
       );
     }
 
-    if (player.controls.firstElementChild !== playerButton) player.controls.prepend(playerButton);
+    if (!playerPlays) {
+      playerPlays = el("span", {
+        className: `${PLAYER_PLAYS_CLASS} hidden items-center sm:flex`,
+        [CONTROL_ATTRIBUTE]: true,
+      });
+    }
+
+    if (player.controls.firstElementChild !== playerPlays || playerPlays.nextElementSibling !== playerButton) {
+      player.controls.prepend(playerPlays, playerButton);
+    }
 
     const available = Boolean(player.title && player.path);
     const favorite = available && isFavoriteTitle(player.path, getPlayerTitles(player.title));
     playerButton.hidden = !available;
     playerButton.classList.toggle("text-yellow", favorite);
     describeFavorite(playerButton, favorite, player.title);
+
+    const count = available ? plays[playKeyFor(player).key]?.count ?? 0 : 0;
+    const showCount = count > 0 && settings.showPlays;
+    playerPlays.classList.toggle(`${PLAYER_PLAYS_CLASS}-empty`, !showCount);
+    const countText = showCount ? String(count) : "";
+    if (playerPlays.dataset.count !== countText) {
+      playerPlays.dataset.count = countText;
+      playerPlays.innerHTML = showCount ? `${ICONS.play}<span>${countText}</span>` : "";
+      playerPlays.title = showCount ? `Played ${count} time${count === 1 ? "" : "s"}` : "";
+    }
 
     trackPlayback(player);
   }
@@ -1378,7 +2195,7 @@
         position: relative;
       }
 
-      html[${FAVORITES_ONLY_ATTRIBUTE}] ${TRACK_ROW_SELECTOR}:not([${FAVORITE_ROW_ATTRIBUTE}="true"]),
+      ${TRACK_ROW_SELECTOR}[${VIEW_HIDDEN_ATTRIBUTE}="true"],
       ${TRACK_ROW_SELECTOR}[${COLLAPSED_ROW_ATTRIBUTE}="true"],
       ${TRACK_ROW_SELECTOR}[${FILTERED_ROW_ATTRIBUTE}="true"] {
         display: none !important;
@@ -1416,6 +2233,87 @@
       .${FAVORITE_BUTTON_CLASS}:hover,
       .${VERSIONS_CLASS}:hover {
         background-color: color-mix(in srgb, currentColor 12%, transparent);
+      }
+
+      .${EDIT_CLASS} {
+        display: grid;
+        place-items: center;
+        width: 24px;
+        height: 24px;
+        padding: 0;
+        border: 0;
+        border-radius: 4px;
+        background: transparent;
+        color: inherit;
+        cursor: pointer;
+        opacity: 0;
+        transition: opacity 140ms ease-out, background-color 140ms ease-out;
+      }
+
+      .${EDIT_CLASS} svg {
+        fill: none;
+        stroke: currentColor;
+        stroke-width: 1.8;
+        stroke-linejoin: round;
+        stroke-linecap: round;
+      }
+
+      .${EDIT_CLASS}:hover {
+        background-color: color-mix(in srgb, currentColor 12%, transparent);
+      }
+
+      ${TRACK_ROW_SELECTOR}:hover .${EDIT_CLASS},
+      ${TRACK_ROW_SELECTOR}[${SELECTED_ROW_ATTRIBUTE}="true"] .${EDIT_CLASS},
+      .${EDIT_CLASS}:focus-visible {
+        opacity: 1;
+      }
+
+      .${NEW_CLASS} {
+        padding: 1px 7px;
+        border-radius: 999px;
+        background-color: var(--color-yellow, #fdd000);
+        color: #000;
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.02em;
+        line-height: 16px;
+      }
+
+      .${NEW_CLASS}[hidden],
+      .${META_CLASS}[hidden] {
+        display: none !important;
+      }
+
+      .${META_CLASS} {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 4px 8px;
+        margin-top: 2px;
+        font-size: 12px;
+        line-height: 16px;
+        opacity: 0.75;
+      }
+
+      .${META_CLASS}-tag {
+        font-weight: 600;
+      }
+
+      .${META_CLASS}-note {
+        display: inline-flex;
+      }
+
+      .${META_CLASS}-note svg {
+        fill: none;
+        stroke: currentColor;
+        stroke-width: 1.8;
+      }
+
+      .${META_CLASS}-note-text {
+        max-width: 28ch;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
       }
 
       ${TRACK_ROW_SELECTOR}:hover .${FAVORITE_BUTTON_CLASS},
@@ -1522,6 +2420,23 @@
         font-variant-numeric: tabular-nums;
       }
 
+      /* Player play count */
+      .${PLAYER_PLAYS_CLASS} {
+        gap: 3px;
+        padding: 0 4px;
+        font-size: 12px;
+        font-variant-numeric: tabular-nums;
+        opacity: 0.7;
+      }
+
+      .${PLAYER_PLAYS_CLASS} svg {
+        fill: currentColor;
+      }
+
+      .${PLAYER_PLAYS_CLASS}.${PLAYER_PLAYS_CLASS}-empty {
+        display: none !important;
+      }
+
       /* Player heart */
       .${PLAYER_FAVORITE_CLASS} svg {
         width: 20px;
@@ -1562,6 +2477,242 @@
         height: 20px;
       }
 
+      .${LAUNCHER_CLASS}-busy::after {
+        content: "";
+        position: absolute;
+        top: 7px;
+        right: 7px;
+        width: 8px;
+        height: 8px;
+        border-radius: 999px;
+        background-color: var(--color-yellow, #fdd000);
+      }
+
+      .${PANEL_CLASS}-tabs {
+        display: flex;
+        gap: 2px;
+        min-width: 0;
+        overflow-x: auto;
+        scrollbar-width: none;
+      }
+
+      .${PANEL_CLASS}-bar {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 4px;
+        margin: 4px 4px 8px;
+      }
+
+      .${PANEL_CLASS}-bar > span {
+        margin-right: auto;
+        font-size: 13px;
+        opacity: 0.75;
+      }
+
+      .${PANEL_CLASS}-action[aria-pressed="true"],
+      .${PANEL_CLASS}-primary {
+        background-color: rgba(255, 255, 255, 0.14);
+        opacity: 1;
+      }
+
+      .${PANEL_CLASS}-current {
+        background-color: rgba(253, 208, 0, 0.14);
+      }
+
+      .${PANEL_CLASS}-search {
+        box-sizing: border-box;
+        width: calc(100% - 8px);
+        margin: 4px 4px 6px;
+        padding: 8px 12px;
+        border: 1px solid rgba(255, 255, 255, 0.16);
+        border-radius: 12px;
+        background: rgba(255, 255, 255, 0.06);
+        color: inherit;
+        font: inherit;
+        outline: none;
+      }
+
+      .${PANEL_CLASS}-search:focus {
+        border-color: rgba(255, 255, 255, 0.4);
+      }
+
+      .${PANEL_CLASS}-figures {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 6px;
+        margin: 6px 4px 4px;
+      }
+
+      .${PANEL_CLASS}-figure {
+        display: flex;
+        flex-direction: column;
+        padding: 8px 10px;
+        border-radius: 12px;
+        background: rgba(255, 255, 255, 0.06);
+      }
+
+      .${PANEL_CLASS}-figure strong {
+        font-size: 18px;
+        font-variant-numeric: tabular-nums;
+      }
+
+      .${PANEL_CLASS}-figure span {
+        font-size: 12px;
+        opacity: 0.6;
+      }
+
+      .${PANEL_CLASS}-ranked {
+        background-image: linear-gradient(to right, rgba(255, 255, 255, 0.07) var(--bar), transparent var(--bar));
+        margin-bottom: 2px;
+      }
+
+      .${PANEL_CLASS}-plain li {
+        display: flex;
+        justify-content: space-between;
+        gap: 8px;
+        padding: 6px 8px;
+      }
+
+      .${PANEL_CLASS}-setting {
+        display: flex;
+        align-items: flex-start;
+        gap: 10px;
+        padding: 6px 8px;
+        border-radius: 12px;
+        cursor: pointer;
+      }
+
+      .${PANEL_CLASS}-setting:hover {
+        background-color: rgba(255, 255, 255, 0.06);
+      }
+
+      .${PANEL_CLASS}-setting input {
+        margin-top: 3px;
+        accent-color: var(--color-yellow, #fdd000);
+      }
+
+      .${PANEL_CLASS}-setting span {
+        display: flex;
+        flex-direction: column;
+      }
+
+      .${PANEL_CLASS}-setting small {
+        font-size: 12px;
+        opacity: 0.55;
+      }
+
+      .${PANEL_CLASS}-shortcuts {
+        display: grid;
+        grid-template-columns: auto 1fr;
+        gap: 4px 12px;
+        margin: 4px 8px 8px;
+        font-size: 12px;
+      }
+
+      .${PANEL_CLASS}-shortcuts dt {
+        font-weight: 600;
+        white-space: nowrap;
+      }
+
+      .${PANEL_CLASS}-shortcuts dd {
+        margin: 0;
+        opacity: 0.65;
+      }
+
+      /* Tag and note editor */
+      .${EDITOR_CLASS} {
+        position: fixed;
+        top: 15vh;
+        left: 50%;
+        z-index: 2147483001;
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        width: min(420px, calc(100vw - 32px));
+        padding: 16px;
+        border-radius: 20px;
+        color: #fff;
+        font-size: 14px;
+        transform: translateX(-50%);
+      }
+
+      .${EDITOR_CLASS}-title {
+        margin: 0;
+        overflow: hidden;
+        font-size: 15px;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .${EDITOR_CLASS}-label {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        font-size: 12px;
+        opacity: 0.85;
+      }
+
+      .${EDITOR_CLASS}-input {
+        box-sizing: border-box;
+        width: 100%;
+        padding: 8px 12px;
+        border: 1px solid rgba(255, 255, 255, 0.16);
+        border-radius: 12px;
+        background: rgba(255, 255, 255, 0.06);
+        color: inherit;
+        font: inherit;
+        font-size: 14px;
+        resize: vertical;
+        outline: none;
+      }
+
+      .${EDITOR_CLASS}-input:focus {
+        border-color: rgba(255, 255, 255, 0.4);
+      }
+
+      .${EDITOR_CLASS}-chips {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 4px;
+        margin-top: -4px;
+      }
+
+      .${EDITOR_CLASS}-chip,
+      .${EDITOR_CLASS}-button {
+        padding: 3px 10px;
+        border: 0;
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.08);
+        color: inherit;
+        font: inherit;
+        font-size: 12px;
+        cursor: pointer;
+      }
+
+      .${EDITOR_CLASS}-actions {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+
+      .${EDITOR_CLASS}-hint {
+        margin-right: auto;
+        font-size: 11px;
+        opacity: 0.45;
+      }
+
+      .${EDITOR_CLASS}-button {
+        padding: 6px 14px;
+        font-size: 13px;
+      }
+
+      .${EDITOR_CLASS}-primary {
+        background: #fff;
+        color: #000;
+        font-weight: 600;
+      }
+
       .${PANEL_CLASS} {
         position: fixed;
         left: 24px;
@@ -1569,7 +2720,7 @@
         z-index: 2147483000;
         display: flex;
         flex-direction: column;
-        width: min(360px, calc(100vw - 32px));
+        width: min(380px, calc(100vw - 32px));
         max-height: min(70vh, 600px);
         border-radius: 20px;
         color: #fff;
@@ -1599,7 +2750,9 @@
       }
 
       .${PANEL_CLASS}-tab {
-        padding: 5px 12px;
+        flex: none;
+        padding: 5px 10px;
+        font-size: 13px;
         border-radius: 999px;
         opacity: 0.6;
       }
@@ -2082,7 +3235,8 @@
 
   function applyVisibility(rows, filters, groups) {
     rows.forEach((row) => {
-      setAttributeFlag(row, FILTERED_ROW_ATTRIBUTE, !matchesFilters(getTitle(row), filters));
+      setAttributeFlag(row, FILTERED_ROW_ATTRIBUTE, !matchesFilters(row, filters));
+      setAttributeFlag(row, VIEW_HIDDEN_ATTRIBUTE, isHiddenByView(row));
 
       const group = groups?.get(row) ?? null;
       const expanded = Boolean(group && expandedGroups.has(group.key));
@@ -2117,15 +3271,22 @@
     if (!rawQuery) {
       lastExactKey = null;
       recordOriginalOrder(rows);
+      recordVisit(path, rows);
       groupsAvailable = rows.length > 1 && buildGroups(rows).size > 0;
     }
 
     const groups = !rawQuery && settings.groupVersions ? buildGroups(rows) : null;
     applyVisibility(rows, filters, groups);
+    rows.forEach((row) => {
+      const badge = row.querySelector(`.${NEW_CLASS}`);
+      if (badge) badge.hidden = !isNew(row);
+    });
     renderToolbar(list, {
       query: rawQuery,
-      resultCount: rows.filter((row) => !row.hasAttribute(FILTERED_ROW_ATTRIBUTE) && (!favoritesOnly || isFavorite(row))).length,
+      rows,
+      resultCount: rows.filter((row) => !row.hasAttribute(FILTERED_ROW_ATTRIBUTE) && !row.hasAttribute(VIEW_HIDDEN_ATTRIBUTE)).length,
     });
+    if (selectedRow && !isRowVisible(selectedRow)) clearSelectedRow();
 
     if (!list || rows.length < 2) return;
 
@@ -2192,7 +3353,7 @@
     decorateRows();
     schedulePlayerSync();
 
-    if (favoritesOnly && getProjectPath() !== favoritesOnlyPath) setFavoritesOnly(false);
+    if (viewPath && getProjectPath() !== viewPath) setView({ favoritesOnly: false, newOnly: false, tagFilter: null });
 
     const searchOpen = Boolean(getSearchInput());
     if (searchWasOpen && !searchOpen) clearSelectedRow();
@@ -2229,12 +3390,39 @@
     const key = event.key;
     const onPage = event.target === document.body || event.target === document.documentElement || !(event.target instanceof Element);
 
-    if (key === "Escape" && panel) {
-      togglePanel(false);
+    if (key === "Escape" && (panel || editor)) {
+      if (editor) closeEditor();
+      else togglePanel(false);
       return true;
     }
     if (event.shiftKey && event.code === "KeyF") {
       togglePanel();
+      return true;
+    }
+    if (key === "?") {
+      togglePanel(true, "more");
+      panel?.querySelector(`.${PANEL_CLASS}-shortcuts`)?.scrollIntoView({ block: "start" });
+      return true;
+    }
+    if (!settings.shortcuts) return false;
+    if (!event.shiftKey && event.code === "KeyE") {
+      openEditor(editTarget());
+      return true;
+    }
+    if (!event.shiftKey && event.code === "KeyV") {
+      switchVersion();
+      return true;
+    }
+    if (!event.shiftKey && key === "[") {
+      setLoopPoint("start");
+      return true;
+    }
+    if (!event.shiftKey && key === "]") {
+      setLoopPoint("end");
+      return true;
+    }
+    if (!event.shiftKey && key === "\\") {
+      setLoopPoint("clear");
       return true;
     }
     if (!event.shiftKey && event.code === "KeyL") {
@@ -2242,11 +3430,13 @@
       return true;
     }
     if (event.shiftKey && event.code === "KeyN") {
-      skipTrack(1);
+      if (queue) advanceQueue(1);
+      else skipTrack(1);
       return true;
     }
     if (event.shiftKey && event.code === "KeyP") {
-      skipTrack(-1);
+      if (queue) advanceQueue(-1);
+      else skipTrack(-1);
       return true;
     }
     if (!event.shiftKey && key === ".") {
@@ -2323,9 +3513,10 @@
     (event) => {
       if (!(event.target instanceof Element)) return;
 
-      if (panel && !event.target.closest(`.${PANEL_CLASS}, .${LAUNCHER_CLASS}, .${TOAST_CLASS}`)) {
+      if (panel && !event.target.closest(`.${PANEL_CLASS}, .${LAUNCHER_CLASS}, .${TOAST_CLASS}, .${EDITOR_CLASS}`)) {
         togglePanel(false);
       }
+      if (editor && !event.target.closest(`.${EDITOR_CLASS}, .${EDIT_CLASS}`)) closeEditor();
 
       // Clicking the player title while already on its project scrolls to the track
       // instead of reloading the same page; from elsewhere it navigates, then scrolls.
@@ -2360,6 +3551,10 @@
       plays = loadJSON(STORAGE.plays, {});
     } else if (event.key === STORAGE.settings) {
       settings = { ...settings, ...loadJSON(STORAGE.settings, {}) };
+    } else if (event.key === STORAGE.tags) {
+      tags = loadJSON(STORAGE.tags, {});
+    } else if (event.key === STORAGE.notes) {
+      notes = loadJSON(STORAGE.notes, {});
     } else {
       return;
     }
@@ -2380,6 +3575,7 @@
   animateSearchEntrance();
   animateProjectEntrance();
   scheduleRanking();
+  addEventListener("pagehide", flushListening);
   // Wait until React has finished taking over the page before offering to resume.
   setTimeout(maybeOfferResume, RESUME_PROMPT_DELAY_MS);
 
